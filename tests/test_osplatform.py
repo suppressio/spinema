@@ -59,6 +59,7 @@ def test_drive_status_not_linux_is_unknown(monkeypatch: pytest.MonkeyPatch,
     device = tmp_path / "sr0"
     device.touch()
     monkeypatch.setattr(osplatform, "LINUX", False)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     assert drive_status(str(device)) == DriveStatus.UNKNOWN
 
 
@@ -126,6 +127,7 @@ def test_list_drives(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(osplatform.glob, "glob", glob)
     monkeypatch.setattr(osplatform, "LINUX", True)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     assert osplatform.list_drives() == ["/dev/sr0", "/dev/sr1"]
     monkeypatch.setattr(osplatform, "LINUX", False)
     assert osplatform.list_drives() == []
@@ -150,6 +152,7 @@ def test_load_library_tries_candidates_in_order(monkeypatch: pytest.MonkeyPatch)
 
     # the .so candidate names are Linux's own, tested regardless of where this runs
     monkeypatch.setattr(osplatform, "MACOS", False)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     monkeypatch.setattr(osplatform.sys, "platform", "linux")
     monkeypatch.setattr(osplatform.ctypes.util, "find_library", nothing)
     monkeypatch.setattr(osplatform.ctypes, "CDLL", cdll)
@@ -236,6 +239,7 @@ def test_has_library_falls_back_to_the_known_path(monkeypatch: pytest.MonkeyPatc
     # of where this runs
     monkeypatch.setattr(osplatform, "LINUX", True)
     monkeypatch.setattr(osplatform, "MACOS", False)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     monkeypatch.setattr(osplatform.sys, "platform", "linux")
     monkeypatch.setattr(osplatform.ctypes.util, "find_library", nothing)
     monkeypatch.setattr(osplatform.Path, "exists", exists)
@@ -257,6 +261,7 @@ def test_has_library_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_default_temp_dir_is_slash_tmp_on_linux(monkeypatch: pytest.MonkeyPatch) -> None:
     # macOS sets TMPDIR itself; drop it so the plain default is what is checked here
     monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     assert default_temp_dir() == "/tmp"                       # noqa: S108
 
 
@@ -279,12 +284,14 @@ def test_default_program_log_under_xdg_state_home(monkeypatch: pytest.MonkeyPatc
     # the XDG path is Linux's own (macOS always takes ~/Library/Logs), tested
     # regardless of where this runs
     monkeypatch.setattr(osplatform, "MACOS", False)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     assert default_program_log() == tmp_path / "spinema" / "spinema.log"
 
 
 def test_default_program_log_falls_back_to_dot_local_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(osplatform, "MACOS", False)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     assert default_program_log() == Path.home() / ".local" / "state" / "spinema" \
         / "spinema.log"
