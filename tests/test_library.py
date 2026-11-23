@@ -766,7 +766,7 @@ def test_library_both_light_and_removal(tmp_path: Path) -> None:
     tree, lib = make_library(tmp_path, audio_files="both", light=True, sub_langs=[])
     source = DiscSource(str(tmp_path / "d"))
     source.sidecars = [(".ita.srt", str(tmp_path / "x.ita.srt"))]
-    (tmp_path / "x.ita.srt").write_text("1\n")
+    (tmp_path / "x.ita.srt").write_bytes(b"1\n")
     added = lib.add(source)
     expected: list[str] = []
     for folder in ("Blu-ray", "Blu-ray/Light"):
@@ -816,7 +816,7 @@ def test_library_heavy_layout(tmp_path: Path, kind: str, light: bool, extra: boo
     source.two_d = kind != "3d"
     source.category = {"2d": "Blu-ray", "3d": "Blu-ray 3D", "dvd": "DVD"}[kind]
     source.subfolder = "Extra" if extra else ""
-    (tmp_path / "sidecar").write_text("1\n")
+    (tmp_path / "sidecar").write_bytes(b"1\n")
     source.sidecars = [(".ita.srt", str(tmp_path / "sidecar"))]
     added = lib.add(source)
     # Each enabled quality mirrors normal, including subtitles, sidecars and multi-audio.
