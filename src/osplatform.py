@@ -97,6 +97,10 @@ def _drive_status_windows(device: str) -> DriveStatus:
 
 
 def _drive_status_linux(device: str) -> DriveStatus:
+    # spelled as sys.platform, not WINDOWS: pyright narrows only on sys.platform, and
+    # without it the Windows type check flags fcntl and os.O_NONBLOCK below
+    if sys.platform == "win32":
+        return DriveStatus.UNKNOWN
     try:
         fd = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
     except OSError:
