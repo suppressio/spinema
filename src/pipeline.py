@@ -1,12 +1,13 @@
 """
 pipeline.py — encoder choice and the decode chain, independent of the source.
+The chain is argv lists, one per stage, run by procchain.ProcessChain without
+a shell:
 
     <source video command>              # Annex B H.264 + MVC (see sources.py)
       | edge264mvc_test - -O              # MVC -> Y4M SBS 3840x1080
       | ffmpeg -i - <source audio> ...  # encode + audio -> output
 """
 import glob
-import shlex
 import subprocess
 from dataclasses import dataclass
 
@@ -15,14 +16,15 @@ from sources import Source
 # Video encoders, best first. Bitrate is constant (CBR) because the virtual
 # file maps bytes to seconds linearly. VAAPI only encodes frames already in
 # a hardware surface, hence its device (baked in here: no --vaapi-device
-# option, see pick_encoder()) and FILTER_SUFFIX below.
+# option, see pick_encoder()) and FILTER_SUFFIX below. "{b}" / "{half}" /
+# "{device}" are placeholder tokens, replaced element-wise by encoder_args().
 ENCODERS = {
-    "nvenc": "-c:v h264_nvenc -preset p4 -rc cbr -b:v {b} -maxrate {b} -bufsize {half} "
-             "-forced-idr 1",
-    "vaapi": "-vaapi_device {device} -c:v h264_vaapi -rc_mode CBR -b:v {b} -maxrate {b} "
-             "-bufsize {half}",
-    "x264": "-c:v libx264 -preset veryfast -b:v {b} -maxrate {b} -bufsize {half} "
-            "-x264-params nal-hrd=cbr",
+    "nvenc": ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "cbr", "-b:v", "{b}",
+              "-maxrate", "{b}", "-bufsize", "{half}", "-forced-idr", "1"],
+    "vaapi": ["-vaapi_device", "{device}", "-c:v", "h264_vaapi", "-rc_mode", "CBR",
+              "-b:v", "{b}", "-maxrate", "{b}", "-bufsize", "{half}"],
+    "x264": ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "{b}", "-maxrate", "{b}",
+             "-bufsize", "{half}", "-x264-params", "nal-hrd=cbr"],
 }
 
 # a per-encoder filter chain appended to the video output of every graph that
@@ -61,9 +63,10 @@ def quality_for(source: Source, level: str) -> Quality:
     return QUALITIES[(source.quality_key, level)]
 
 
-def encoder_args(encoder: str, video_bitrate: int, vaapi_device: str = "") -> str:
+def encoder_args(encoder: str, video_bitrate: int, vaapi_device: str = "") -> list[str]:
     kbit = video_bitrate // 1000
-    return ENCODERS[encoder].format(b=f"{kbit}k", half=f"{kbit // 2}k", device=vaapi_device)
+    sub = {"{b}": f"{kbit}k", "{half}": f"{kbit // 2}k", "{device}": vaapi_device}
+    return [sub.get(tok, tok) for tok in ENCODERS[encoder]]
 
 
 def filter_suffix(encoder: str) -> str:
@@ -92,7 +95,7 @@ def _test_encode(encoder: str, *, vaapi_device: str = "") -> bool:
     vf = ["-vf", suffix] if suffix else []
     test = subprocess.run(
         ["ffmpeg", "-v", "quiet", "-f", "lavfi", "-i", "color=s=256x256", *vf,
-         "-frames:v", "1", *shlex.split(encoder_args(encoder, _PROBE_BITRATE, vaapi_device)),
+         "-frames:v", "1", *encoder_args(encoder, _PROBE_BITRATE, vaapi_device),
          "-f", "null", "-"],
         check=False,
     )
@@ -134,9 +137,10 @@ def pick_encoder(requested: str = "auto") -> tuple[str, str]:
     return "x264", ""
 
 
-def decode_command(source: Source, start: float, output_args: str,
-                   filter_suffix: str = "") -> str:
-    """Full shell pipeline from keyframe `start`.
+def decode_command(source: Source, start: float, output_args: list[str],
+                   filter_suffix: str = "") -> list[list[str]]:
+    """The decode chain from keyframe `start`, one argv per stage (see the
+    module docstring); run with procchain.ProcessChain, stage 0 first.
 
     output_args: codecs and output of the last ffmpeg. filter_suffix: the
     chosen encoder's (see pipeline.filter_suffix()), chained onto the video
@@ -150,14 +154,14 @@ def decode_command(source: Source, start: float, output_args: str,
                      f"[pre][{source.sub_ref(0)}]overlay=eof_action=pass[ov];[ov]{post}[v]")
             sub_args = source.sub_decoder_args()
         else:
-            graph, sub_args = f"[{source.video_map}]{pre},{post}[v]", ""
+            graph, sub_args = f"[{source.video_map}]{pre},{post}[v]", []
         graph = with_filter_suffix(graph, filter_suffix)
-        return (
-            f"{source.video_command(start)} "
-            f"| ffmpeg -nostdin -v warning {sub_args} -f {source.input_format} "
-            f"{source.probe_args} -i - "
-            f"-filter_complex {shlex.quote(graph)} -map '[v]' {source.audio_map(0)} {output_args}"
-        )
+        return [
+            source.video_command(start),
+            ["ffmpeg", "-nostdin", "-v", "warning", *sub_args, "-f", source.input_format,
+             *source.probe_args, "-i", "-",
+             "-filter_complex", graph, "-map", "[v]", *source.audio_map(0), *output_args],
+        ]
     # 3D: the subtitle comes with the audio (input #1) and is drawn on both halves,
     # each copy moved inward so that it floats slightly in front of the screen
     if source.sub is not None:
@@ -166,16 +170,15 @@ def decode_command(source: Source, start: float, output_args: str,
                  f"[0:v][sa]overlay=x={d}:y=0:eof_action=pass[l];"
                  f"[l][sb]overlay=x={half - d}:y=0:eof_action=pass[v]")
         graph = with_filter_suffix(graph, filter_suffix)
-        video = f"-filter_complex {shlex.quote(graph)} -map '[v]'"
-        sub_args = source.sub_decoder_args()
+        video, sub_args = ["-filter_complex", graph, "-map", "[v]"], source.sub_decoder_args()
     elif filter_suffix:
         graph = f"[0:v]{filter_suffix}[v]"
-        video, sub_args = f"-filter_complex {shlex.quote(graph)} -map '[v]'", ""
+        video, sub_args = ["-filter_complex", graph, "-map", "[v]"], []
     else:
-        video, sub_args = "-map 0:v", ""
-    return (
-        f"{source.video_command(start)} "
-        f"| edge264mvc_test - -O "
-        f"| ffmpeg -nostdin -v warning -i - {sub_args} {source.audio_input(start)} "
-        f"{video} {source.audio_map()} {output_args}"
-    )
+        video, sub_args = ["-map", "0:v"], []
+    return [
+        source.video_command(start),
+        ["edge264mvc_test", "-", "-O"],
+        ["ffmpeg", "-nostdin", "-v", "warning", "-i", "-", *sub_args, *source.audio_input(start),
+         *video, *source.audio_map(), *output_args],
+    ]

@@ -25,7 +25,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -37,7 +36,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol, Self, cast, override
+from typing import Any, ClassVar, Protocol, Self, cast, override
 
 import bluray
 import dvd
@@ -94,7 +93,9 @@ class Source(ABC):
     input_format: str = "mpegts"    # two_d: format of video_command's output
     video_map: str = "0:i:0x1011"   # two_d: the video stream in it
     # two_d: how much of that stream ffmpeg reads to find its tracks before it starts
-    probe_args: str = "-analyzeduration 2000000 -probesize 10000000"
+    probe_args: ClassVar[list[str]] = ["-analyzeduration", "2000000", "-probesize", "10000000"]
+    env: dict[str, str] = {}        # noqa: RUF012 — extra variables video_command() needs;
+    # never mutated in place, only replaced wholesale (BlurayDiscSource.__init__)
     pre_filter: str = ""            # video filters before the subtitle overlay (deinterlace)
     post_filter: str = ""           # ... and after it (scale)
     sub: SubtitleTrack | None = None  # the track drawn into this file, if any
@@ -124,10 +125,10 @@ class Source(ABC):
         """The subtitle stream as an ffmpeg stream specifier on that input."""
         return f"{input_index}:i:{self.drawn_sub().stream:#x}"
 
-    def sub_decoder_args(self) -> str:
-        """ffmpeg input options for the subtitle decoder."""
-        args = f"-canvas_size {self.sub_canvas}" if self.sub_canvas else ""
-        return args + (" -forced_subs_only 1" if self.forced_only else "")
+    def sub_decoder_args(self) -> list[str]:
+        """ffmpeg input argv for the subtitle decoder."""
+        args = ["-canvas_size", self.sub_canvas] if self.sub_canvas else []
+        return args + (["-forced_subs_only", "1"] if self.forced_only else [])
 
     def variants(self) -> Sequence[Self]:
         """One source per audio language: players such as the VITURE 3D Player
@@ -140,16 +141,16 @@ class Source(ABC):
         """Start time of the keyframe the video will actually start from."""
 
     @abstractmethod
-    def video_command(self, start: float) -> str:
-        """Shell command writing Annex B H.264 + MVC to stdout, from keyframe `start`."""
+    def video_command(self, start: float) -> list[str]:
+        """argv writing Annex B H.264 + MVC to stdout, from keyframe `start`."""
 
     @abstractmethod
-    def audio_input(self, start: float) -> str:
-        """ffmpeg input options adding the audio as input #1, starting at `start`."""
+    def audio_input(self, start: float) -> list[str]:
+        """ffmpeg input argv adding the audio as input #1, starting at `start`."""
 
     @abstractmethod
-    def audio_map(self, input_index: int = 1) -> str:
-        """ffmpeg -map option(s) selecting the audio tracks from that input ('' = no audio)."""
+    def audio_map(self, input_index: int = 1) -> list[str]:
+        """ffmpeg -map argv selecting the audio tracks from that input ([] = no audio)."""
 
 
 def _lang_of(stream: dict[str, Any]) -> str:
@@ -225,28 +226,31 @@ class MkvSource(Source):
         return seconds
 
     @override
-    def video_command(self, start: float) -> str:
+    def video_command(self, start: float) -> list[str]:
         # For DTS-seeking formats with B-frames, ffmpeg moves the seek point back
         # by 3/23 s. Asking for exactly keyframe K would land on the PREVIOUS
         # keyframe (~1 s earlier) and the picture would lag the audio by that
         # much. Asking for K+0.2 lands on K; stream copy keeps packets from the
         # keyframe on, so the first frame is still K.
-        ss = f"-ss {start + 0.2:.3f} " if start > 0 else ""
-        return (f"ffmpeg -nostdin -v error {ss}-i {shlex.quote(self.path)} -map 0:v:0 "
-                f"-c copy -bsf:v h264_mp4toannexb -f h264 -")
+        ss = ["-ss", f"{start + 0.2:.3f}"] if start > 0 else []
+        return ["ffmpeg", "-nostdin", "-v", "error", *ss, "-i", self.path, "-map", "0:v:0",
+                "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "h264", "-"]
 
     @override
-    def audio_input(self, start: float) -> str:
-        ss = f"-ss {start:.3f} " if start > 0 else ""
-        return f"{ss}-i {shlex.quote(self.path)}"
+    def audio_input(self, start: float) -> list[str]:
+        ss = ["-ss", f"{start:.3f}"] if start > 0 else []
+        return [*ss, "-i", self.path]
 
     @override
     def sub_ref(self, input_index: int) -> str:
         return f"{input_index}:{self.drawn_sub().stream}"
 
     @override
-    def audio_map(self, input_index: int = 1) -> str:
-        return " ".join(f"-map {input_index}:{i}" for i in self.audio_indexes)
+    def audio_map(self, input_index: int = 1) -> list[str]:
+        out: list[str] = []
+        for i in self.audio_indexes:
+            out += ["-map", f"{input_index}:{i}"]
+        return out
 
     @override
     def variants(self) -> Sequence[Self]:
@@ -768,11 +772,12 @@ class DiscSource(Source):
         return out
 
     @override
-    def audio_map(self, input_index: int = 1) -> str:
+    def audio_map(self, input_index: int = 1) -> list[str]:
         # the disc's PMT carries no language: take it from the playlist's STN table
-        return " ".join(f"-map {input_index}:i:{p:#x} -metadata:s:a:{n} language={lang}"
-                        for n, (p, lang) in enumerate(zip(self.audio_pids, self.audio_langs,
-                                                          strict=True)))
+        out: list[str] = []
+        for n, (p, lang) in enumerate(zip(self.audio_pids, self.audio_langs, strict=True)):
+            out += ["-map", f"{input_index}:i:{p:#x}", f"-metadata:s:a:{n}", f"language={lang}"]
+        return out
 
 
 class BlurayDiscSource(DiscSource):
@@ -977,32 +982,32 @@ class BlurayDiscSource(DiscSource):
         return self.starts[i] + max(0.0, sp.time)
 
     @override
-    def video_command(self, start: float) -> str:
-        env = " ".join(f"{k}={v}" for k, v in self.env.items())
+    def video_command(self, start: float) -> list[str]:
         # the subtitle stream travels like an audio one (same filtering and start)
-        pids = " ".join(f"--audio-pid {p:#x}" for p in
-                        self.audio_pids + ([self.sub.stream] if self.sub is not None else []))
+        pids: list[str] = []
+        for p in self.audio_pids + ([self.sub.stream] if self.sub is not None else []):
+            pids += ["--audio-pid", f"{p:#x}"]
         # +2 ms: `start` is an EP_map time (truncated), make sure the same entry is found
-        cmd = (f"{env} {shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'disc_reader.py'))} "
-               f"{shlex.quote(self.path)} --playlist {self.playlist} --start {start + 0.002:.3f} "
-               f"{pids}")
+        cmd = [sys.executable, str(HERE / "disc_reader.py"), self.path,
+               "--playlist", self.playlist, "--start", f"{start + 0.002:.3f}", *pids]
         if self.two_d:
-            return f"{cmd} --mode 2d".strip()
+            return [*cmd, "--mode", "2d"]
         # 3D: one FIFO per pipeline start, disc_reader writes the audio TS into it
         if self._fifo and os.path.exists(self._fifo):
             os.unlink(self._fifo)
         if sys.platform == "win32":
             raise NotImplementedError("3D audio goes through a FIFO (os.mkfifo): POSIX only "
-                                      "until #103")
+                                      "until #192")
         self._fifo = _temp_file("audio.ts")
         os.mkfifo(self._fifo)
-        return f"{cmd} --audio-out {shlex.quote(self._fifo)}".strip()
+        return [*cmd, "--audio-out", self._fifo]
 
     @override
-    def audio_input(self, start: float) -> str:
+    def audio_input(self, start: float) -> list[str]:
         if self._fifo is None:
             raise ValueError("audio_input() before video_command()")
-        return f"-f mpegts -analyzeduration 1000000 -probesize 5000000 -i {shlex.quote(self._fifo)}"
+        return ["-f", "mpegts", "-analyzeduration", "1000000", "-probesize", "5000000",
+                "-i", self._fifo]
 
 
 class DvdSource(DiscSource):
@@ -1015,7 +1020,7 @@ class DvdSource(DiscSource):
     # a program stream announces no tracks: ffmpeg knows one when it meets a
     # packet of it. Titles often open with seconds of logos and warnings without
     # audio, so it looks further (the disc is read far faster than it plays)
-    probe_args = "-analyzeduration 8000000 -probesize 20000000"
+    probe_args: ClassVar[list[str]] = ["-analyzeduration", "8000000", "-probesize", "20000000"]
     sub_canvas = ""                 # DVD: the picture in the same stream gives it
 
     @classmethod
@@ -1115,14 +1120,14 @@ class DvdSource(DiscSource):
                                     for a in chosen) or "none"
 
     @override
-    def sub_decoder_args(self) -> str:
+    def sub_decoder_args(self) -> list[str]:
         # the subpicture colours come from the disc's IFO. ffmpeg refuses -palette as
         # an input option (the dvdsub encoder has an option of the same name), but
         # takes -ifo_palette: a copy of the title's IFO in a temporary folder
         if self._ifo_copy is None:
             self._ifo_copy = _temp_file("VTS.IFO")
             Path(self._ifo_copy).write_bytes(self._ifo_for_palette())
-        return f"-ifo_palette {shlex.quote(self._ifo_copy)} " + super().sub_decoder_args()
+        return ["-ifo_palette", self._ifo_copy, *super().sub_decoder_args()]
 
     def _ifo_for_palette(self) -> bytes:
         """The VTS IFO with the main title's palette in its first PGC, where
@@ -1139,20 +1144,21 @@ class DvdSource(DiscSource):
             return dvd.seek(self._vobs, self.title, seconds).time
 
     @override
-    def video_command(self, start: float) -> str:
-        audio = " ".join(f"--audio {p:#x}" for p in self.audio_pids)
+    def video_command(self, start: float) -> list[str]:
+        audio: list[str] = []
+        for p in self.audio_pids:
+            audio += ["--audio", f"{p:#x}"]
         # +2 ms: `start` is a VOBU time, make sure the same VOBU is found
-        return (f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'dvd_reader.py'))} "
-                f"{shlex.quote(self.path)} --title {self.title.number} "
-                f"--start {start + 0.002:.3f} {audio}"
-                + (f" --sub {self.sub.stream:#x}" if self.sub else ""))
+        cmd = [sys.executable, str(HERE / "dvd_reader.py"), self.path,
+               "--title", str(self.title.number), "--start", f"{start + 0.002:.3f}", *audio]
+        return cmd + (["--sub", f"{self.sub.stream:#x}"] if self.sub else [])
 
     @override
-    def audio_input(self, start: float) -> str:
-        return ""
+    def audio_input(self, start: float) -> list[str]:
+        return []
 
     @override
-    def audio_map(self, input_index: int = 0) -> str:
+    def audio_map(self, input_index: int = 0) -> list[str]:
         return super().audio_map(input_index)
 
 

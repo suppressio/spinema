@@ -5,8 +5,6 @@ so every byte served can be checked against the offset it was read at."""
 import copy
 import logging
 import re
-import shlex
-import subprocess
 import sys
 import threading
 import time
@@ -33,11 +31,6 @@ from library import (
 from pipeline import QUALITIES, Quality
 from sources import Source, SubTrack
 from tree import ROOT_ID, Folder, Tree, read_as
-
-# real pipelines here run through bash -o pipefail and are stopped with
-# os.killpg: neither exists on native Windows until #103 replaces them
-pytestmark = pytest.mark.skipif(sys.platform == "win32",
-                                reason="bash pipelines and os.killpg, POSIX only until #103")
 
 PPS = 500                                  # TS packets per second of movie
 BPS = PPS * TS_PACKET                      # bytes per second
@@ -66,7 +59,7 @@ while end is None or i < end:
 
 
 def producer(start: float, tag: bytes, ready_path: str | None = None,
-             duration: float | None = None) -> str:
+             duration: float | None = None) -> list[str]:
     """Numbered packets from `start` on: forever, like a pipeline the player stops,
     or for `duration` seconds, like ffmpeg -t. Whatever reads it to the end (the
     synthetic tail) needs the duration, or it waits forever and fills the memory."""
@@ -74,7 +67,7 @@ def producer(start: float, tag: bytes, ready_path: str | None = None,
     end = None if duration is None else first + int(duration * BPS) // TS_PACKET
     code = PRODUCER.format(ready_path=ready_path, first=first, tag=tag, every=KEYFRAME_EVERY,
                            end=end)
-    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    return [sys.executable, "-c", code]
 
 
 class FakeSource(Source):
@@ -93,27 +86,29 @@ class FakeSource(Source):
         return float(int(max(0.0, seconds)))
 
     @override
-    def video_command(self, start: float) -> str:
-        return ""
+    def video_command(self, start: float) -> list[str]:
+        return []
 
     @override
-    def audio_input(self, start: float) -> str:
-        return ""
+    def audio_input(self, start: float) -> list[str]:
+        return []
 
     @override
-    def audio_map(self, input_index: int = 1) -> str:
-        return ""
+    def audio_map(self, input_index: int = 1) -> list[str]:
+        return []
 
 
-def fake_decode(source: Source, start: float, output_args: str, filter_suffix: str = "") -> str:
+def fake_decode(source: Source, start: float, output_args: list[str],
+                filter_suffix: str = "") -> list[list[str]]:
     # the muxer's clock, and so the bytes, start at -output_ts_offset
-    m = re.search(r"-output_ts_offset (\S+)", output_args)
-    t0 = float(m.group(1)) if m else start
-    return producer(t0, b"M", source.ready_path if isinstance(source, FakeSource) else None)
+    t0 = (float(output_args[output_args.index("-output_ts_offset") + 1])
+         if "-output_ts_offset" in output_args else start)
+    return [producer(t0, b"M", source.ready_path if isinstance(source, FakeSource) else None)]
 
 
-def fake_filler(vf: VirtualFile, video_input: str, t0: float, duration: float | None = None,
-                extra: str = "", *, sbs: bool = False) -> str:
+def fake_filler(vf: VirtualFile, video_input: list[str], t0: float,
+                duration: float | None = None, extra: list[str] | None = None, *,
+                sbs: bool = False) -> list[str]:
     return producer(t0, b"L", duration=duration)
 
 
@@ -639,32 +634,40 @@ def test_slow_pipeline_is_logged(monkeypatch: pytest.MonkeyPatch,
 
 
 
-def test_no_pipeline_without_killpg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Windows: stop() could not kill the pipeline's process group, so none starts (#103)
-    monkeypatch.delattr(library.os, "killpg")
-    with pytest.raises(NotImplementedError, match=r"os\.killpg"):
-        library.Generator(vfile(tmp_path), 0.0)
-
-
-def test_stop_does_not_hang_on_a_stuck_pipeline(monkeypatch: pytest.MonkeyPatch,
-                                                caplog: pytest.LogCaptureFixture) -> None:
-    """A pipeline stuck on the drive survives SIGKILL: stop() returns all the same."""
+def test_generator_stop_kills_the_chain() -> None:
+    """stop() hands off to the chain Generator.__init__ built: what happens to the
+    processes themselves, including one that survives being killed, is
+    ProcessChain's own concern (tests/test_procchain.py)."""
     gen = object.__new__(library.Generator)
     gen.loader, gen.stopped, gen.cond = None, False, threading.Condition()
     gen.path = "Blu-ray 3D/ITA - x - 3D SBS.ts"
-    proc = Mock(pid=4242)
-    proc.poll.return_value = None
-    proc.wait.side_effect = subprocess.TimeoutExpired("ffmpeg", library.KILL_WAIT)
-    gen.proc = cast("subprocess.Popen[bytes]", proc)
-    killpg = Mock()
-    monkeypatch.setattr(library.os, "killpg", killpg)
-    caplog.set_level(logging.INFO, logger="bd3d_fs")
+    chain = Mock()
+    gen.chain = chain
     gen.stop()
-    if sys.platform != "win32":                  # for pyright: pytestmark skips Windows
-        killpg.assert_called_once_with(4242, library.signal.SIGKILL)
-    proc.wait.assert_called_once_with(library.KILL_WAIT)
+    chain.stop.assert_called_once_with(library.KILL_WAIT)
     assert gen.stopped
-    assert "did not exit 5s after SIGKILL" in caplog.text
+
+
+def test_a_stage_failing_fails_the_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                            caplog: pytest.LogCaptureFixture) -> None:
+    """pipefail: an early stage exiting nonzero is reported even though the chain's
+    last stage (the only one Generator reads from) still reaches a clean EOF."""
+    def fake_decode_failing(source: Source, start: float, output_args: list[str],
+                            filter_suffix: str = "") -> list[list[str]]:
+        return [
+            [sys.executable, "-c", "import sys; sys.exit(1)"],
+            [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        ]
+
+    monkeypatch.setattr(library, "decode_command", fake_decode_failing)
+    caplog.set_level(logging.WARNING, logger="bd3d_fs")
+    vf = vfile(tmp_path)
+    gen = vf._generator_for(0, 1)
+    assert gen is not None
+    with gen.cond:
+        while not gen.eof:
+            gen.cond.wait(timeout=5)
+    assert "the pipeline failed" in caplog.text
 
 # --- the tree of files ---------------------------------------------------------
 
@@ -706,7 +709,7 @@ def test_library_threads_vaapi_device_to_virtual_files(tmp_path: Path) -> None:
                   vaapi_device="/dev/dri/renderD128")
     lib.add(DiscSource(str(tmp_path / "d")))
     vf = movies(tree)[0]
-    assert "-vaapi_device /dev/dri/renderD128" in vf.encode_args
+    assert vf.encode_args[vf.encode_args.index("-vaapi_device") + 1] == "/dev/dri/renderD128"
     assert vf.filter_suffix == "format=nv12,hwupload"
 
 
@@ -839,9 +842,10 @@ def test_heavy_seek_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kin
     q = QUALITIES[(kind, "heavy")]
     bps = q.bytes_per_sec
 
-    def decode(source: Source, start: float, output_args: str, filter_suffix: str = "") -> str:
-        assert f"-muxrate {q.muxrate}" in output_args
-        assert f"-b:v {q.video // 1000}k" in output_args
+    def decode(source: Source, start: float, output_args: list[str],
+              filter_suffix: str = "") -> list[list[str]]:
+        assert output_args[output_args.index("-muxrate") + 1] == str(q.muxrate)
+        assert f"{q.video // 1000}k" in output_args
         return fake_decode(source, start, output_args, filter_suffix)
 
     # Scale the numbered-packet producer to the actual Heavy byte/time mapping.

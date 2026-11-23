@@ -18,7 +18,6 @@ streams, picture size, timestamps.
 import hashlib
 import json
 import os
-import signal
 import stat
 import subprocess
 import sys
@@ -34,10 +33,12 @@ from osplatform import DriveStatus, drive_status
 from pipeline import pick_encoder, quality_for
 from sources import BlurayDiscSource, MkvSource, Source, open_disc
 
-# real bash pipelines stopped with os.killpg, POSIX only until #103: a raise, not
+# test_decoded_3d_frames below still shells out to bash to pipe edge264 into ffmpeg
+# for its one-off frame comparison: not available on native Windows. A raise, not
 # pytest.skip(), so pyright leaves the module out on Windows too
 if sys.platform == "win32":
-    raise pytest.skip.Exception("POSIX only until #103", allow_module_level=True)
+    raise pytest.skip.Exception("needs bash (edge264 | ffmpeg) for the frame comparison",
+                                allow_module_level=True)
 
 pytestmark = pytest.mark.integration
 
@@ -114,9 +115,9 @@ def reference(source: Source) -> Reference:
     return Reference(_reference_key(source))
 
 
-def _read_command(cmd: str, size: int, fifo: str | None = None) -> tuple[bytes, bytes]:
-    """The first `size` bytes a reader command writes, and the first 256 KB of
-    the audio it writes into `fifo` (3D Blu-ray)."""
+def _read_command(cmd: list[str], size: int, fifo: str | None = None) -> tuple[bytes, bytes]:
+    """The first `size` bytes a reader command (argv) writes, and the first 256 KB
+    of the audio it writes into `fifo` (3D Blu-ray)."""
     audio = bytearray()
 
     def drain() -> None:
@@ -129,14 +130,12 @@ def _read_command(cmd: str, size: int, fifo: str | None = None) -> tuple[bytes, 
     reader = threading.Thread(target=drain, daemon=True) if fifo else None
     if reader:
         reader.start()
-    proc: subprocess.Popen[bytes] = subprocess.Popen(
-        ["bash", "-o", "pipefail", "-c", cmd], stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, start_new_session=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert proc.stdout is not None
     data = bytearray()
     while len(data) < size and (chunk := proc.stdout.read(min(1 << 20, size - len(data)))):
         data.extend(chunk)
-    os.killpg(proc.pid, signal.SIGKILL)
+    proc.kill()
     proc.wait()
     if reader:
         reader.join(timeout=10)
