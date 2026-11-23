@@ -700,13 +700,14 @@ def test_a_movie_pipeline_that_cannot_start_stops_its_loader(
     assert all(p.poll() is not None for p in chains[0].processes)
 
 
-def test_eof_is_not_held_by_a_last_stage_that_does_not_exit(
+def test_eof_is_not_held_by_a_stage_that_does_not_exit(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The last stage closes its output but stays alive (stuck on the drive): the
+    """The output reached EOF but a stage stays alive (stuck on the drive): the
     readers still get EOF in bounded time, not a 60 s wait per read."""
     def fake_decode_lingering(source: Source, start: float, output_args: list[str],
                               filter_suffix: str = "") -> list[list[str]]:
-        return [[sys.executable, "-c", "import os, time; os.close(1); time.sleep(60)"]]
+        return [[sys.executable, "-c", "import time; time.sleep(60)"],
+                [sys.executable, "-c", "pass"]]
 
     monkeypatch.setattr(library, "decode_command", fake_decode_lingering)
     monkeypatch.setattr(library, "KILL_WAIT", 0.5)
