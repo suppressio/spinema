@@ -194,9 +194,15 @@ class Generator:
         # command a person can paste into a shell as it is (docs/DEVELOPMENT.md)
         env_prefix = "".join(f"{k}={v} " for k, v in source.env.items())
         log.debug("  %s%s", env_prefix, " | ".join(shlex.join(stage) for stage in stages))
-        with open_pipeline_log(vf.log_path, f"{vf.path}: {'loader' if loader else 'pipeline'} "
-                               f"from {start:.1f}s") as stderr:
-            self.chain = ProcessChain(stages, env=source.env, stderr=stderr)
+        try:
+            with open_pipeline_log(vf.log_path, f"{vf.path}: {'loader' if loader else 'pipeline'} "
+                                   f"from {start:.1f}s") as stderr:
+                self.chain = ProcessChain(stages, env=source.env, stderr=stderr)
+        except BaseException:
+            # the loading animation is already running: nothing would stop it
+            if self.loader is not None:
+                self.loader.stop()
+            raise
         self.stdout_fd = self.chain.stdout.fileno()
         threading.Thread(target=self._pump, daemon=True).start()
 
@@ -219,10 +225,12 @@ class Generator:
                 # last one reading its truncated output to a clean exit, which would
                 # otherwise look like the pipeline reached the real end of the movie.
                 # Not when it is this end that killed it (stop()): that is not a failure.
-                self.chain.processes[-1].wait()
+                # Bounded: a stage that closed its output but does not exit (stuck on
+                # the drive) must not keep the readers from seeing EOF.
+                failed = self.chain.finish(KILL_WAIT)
                 with self.cond:
                     stopped = self.stopped
-                if not stopped and self.chain.failed():
+                if not stopped and failed:
                     log.warning("%s: the pipeline failed (a stage exited with an error, "
                                 "see the pipeline log)", self.path)
                 with self.cond:

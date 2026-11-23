@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from datetime import timedelta
 from pathlib import Path
-from typing import Self, cast, override
+from typing import Any, Self, cast, override
 from unittest.mock import Mock, patch
 
 import pytest
@@ -23,12 +23,14 @@ from library import (
     AUDIO_TRACK_MUX,
     NULL_PACKET,
     TS_PACKET,
+    Generator,
     Library,
     SidecarFile,
     VirtualFile,
     null_padding,
 )
 from pipeline import QUALITIES, Quality
+from procchain import ProcessChain
 from sources import Source, SubTrack
 from tree import ROOT_ID, Folder, Tree, read_as
 
@@ -664,10 +666,61 @@ def test_a_stage_failing_fails_the_pipeline(monkeypatch: pytest.MonkeyPatch, tmp
     vf = vfile(tmp_path)
     gen = vf._generator_for(0, 1)
     assert gen is not None
-    with gen.cond:
-        while not gen.eof:
-            gen.cond.wait(timeout=5)
-    assert "the pipeline failed" in caplog.text
+    try:
+        deadline = time.monotonic() + 10
+        with gen.cond:
+            while not gen.eof and time.monotonic() < deadline:
+                gen.cond.wait(timeout=0.2)
+        assert gen.eof
+        assert "the pipeline failed" in caplog.text
+    finally:
+        gen.stop()
+
+def test_a_movie_pipeline_that_cannot_start_stops_its_loader(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The loading animation starts before the movie's chain: a movie chain that
+    cannot start (its decoder missing) must not leave the animation running."""
+    chains: list[ProcessChain] = []
+
+    class RecordingChain(ProcessChain):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+            super().__init__(*args, **kwargs)
+            chains.append(self)
+
+    def fake_decode_missing(source: Source, start: float, output_args: list[str],
+                            filter_suffix: str = "") -> list[list[str]]:
+        return [["/no/such/decoder-spinema-test"]]
+
+    monkeypatch.setattr(library, "ProcessChain", RecordingChain)
+    monkeypatch.setattr(library, "decode_command", fake_decode_missing)
+    vf = vfile(tmp_path, loader="spinner.mp4")
+    with pytest.raises(FileNotFoundError):
+        Generator(vf, 0, with_loader=True)
+    assert len(chains) == 1                                   # the loader's
+    assert all(p.poll() is not None for p in chains[0].processes)
+
+
+def test_eof_is_not_held_by_a_last_stage_that_does_not_exit(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The last stage closes its output but stays alive (stuck on the drive): the
+    readers still get EOF in bounded time, not a 60 s wait per read."""
+    def fake_decode_lingering(source: Source, start: float, output_args: list[str],
+                              filter_suffix: str = "") -> list[list[str]]:
+        return [[sys.executable, "-c", "import os, time; os.close(1); time.sleep(60)"]]
+
+    monkeypatch.setattr(library, "decode_command", fake_decode_lingering)
+    monkeypatch.setattr(library, "KILL_WAIT", 0.5)
+    vf = vfile(tmp_path)
+    gen = Generator(vf, 0)
+    try:
+        deadline = time.monotonic() + 5
+        with gen.cond:
+            while not gen.eof and time.monotonic() < deadline:
+                gen.cond.wait(timeout=0.2)
+        assert gen.eof
+    finally:
+        gen.stop()
+
 
 # --- the tree of files ---------------------------------------------------------
 

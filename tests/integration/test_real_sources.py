@@ -115,9 +115,11 @@ def reference(source: Source) -> Reference:
     return Reference(_reference_key(source))
 
 
-def _read_command(cmd: list[str], size: int, fifo: str | None = None) -> tuple[bytes, bytes]:
+def _read_command(cmd: list[str], size: int, fifo: str | None = None,
+                  env: dict[str, str] | None = None) -> tuple[bytes, bytes]:
     """The first `size` bytes a reader command (argv) writes, and the first 256 KB
-    of the audio it writes into `fifo` (3D Blu-ray)."""
+    of the audio it writes into `fifo` (3D Blu-ray). `env`: the source's variables
+    over os.environ (the decryption backend, LIBAACS_PATH and LIBBDPLUS_PATH)."""
     audio = bytearray()
 
     def drain() -> None:
@@ -130,7 +132,8 @@ def _read_command(cmd: list[str], size: int, fifo: str | None = None) -> tuple[b
     reader = threading.Thread(target=drain, daemon=True) if fifo else None
     if reader:
         reader.start()
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            env={**os.environ, **env} if env else None)
     assert proc.stdout is not None
     data = bytearray()
     while len(data) < size and (chunk := proc.stdout.read(min(1 << 20, size - len(data)))):
@@ -170,7 +173,7 @@ def _decoder_input(source: Source, at: float) -> tuple[bytes, bytes]:
     cmd = source.video_command(start)
     fifo = getattr(source, "_fifo", None) if isinstance(source, BlurayDiscSource) and \
         not source.two_d else None
-    return _read_command(cmd, 12 * 1024 * 1024, fifo)
+    return _read_command(cmd, 12 * 1024 * 1024, fifo, source.env)
 
 
 def test_decoder_input(source: Source, reference: Reference) -> None:
