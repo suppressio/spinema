@@ -4,10 +4,12 @@ import logging
 import subprocess
 import sys
 import time
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
 
+import procchain
 from procchain import ProcessChain
 
 CAT = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]
@@ -97,3 +99,74 @@ def test_stop_does_not_hang_on_a_stuck_process(caplog: pytest.LogCaptureFixture)
     proc.kill.assert_called_once()
     proc.wait.assert_called_once_with(5)
     assert "did not exit 5s after being killed" in caplog.text
+
+
+def test_a_stage_that_cannot_start_leaves_no_process_behind(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stage whose program is missing raises from Popen: the stages already
+    started must not be left running (stage 0 holding the drive, forever)."""
+    started: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:  # noqa: ANN401
+        proc = cast("subprocess.Popen[bytes]", real_popen(*args, **kwargs))
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(procchain.subprocess, "Popen", recording_popen)
+    sleepy = [sys.executable, "-c", "import time; time.sleep(60)"]
+    with pytest.raises(FileNotFoundError):
+        ProcessChain([sleepy, ["/no/such/program-spinema-test"]])
+    assert len(started) == 1
+    assert started[0].poll() is not None                  # killed and reaped
+
+
+def test_finish_sees_an_early_stage_failing_after_closing_its_output() -> None:
+    """Stage 0 closes its stdout (the next stage sees EOF and exits 0) and only
+    then exits 1: waiting for the last stage alone and polling the rest would
+    miss that failure."""
+    late_failure = [sys.executable, "-c",
+                    "import os, sys, time; os.close(1); time.sleep(0.5); sys.exit(1)"]
+    chain = ProcessChain([late_failure, CAT])
+    try:
+        assert chain.stdout.read() == b""
+        assert chain.finish(5) is True
+    finally:
+        chain.stop(5)
+
+
+def test_finish_is_bounded_when_a_stage_closes_its_output_but_does_not_exit() -> None:
+    lingering = [sys.executable, "-c", "import os, time; os.close(1); time.sleep(60)"]
+    chain = ProcessChain([lingering])
+    try:
+        assert chain.stdout.read() == b""
+        started = time.monotonic()
+        assert chain.finish(0.5) is False                 # still running: not a failure
+        assert time.monotonic() - started < 3
+    finally:
+        chain.stop(5)
+
+
+def test_finish_of_a_successful_chain() -> None:
+    chain = ProcessChain([CAT, CAT])
+    try:
+        chain.stdout.read()
+        assert chain.finish(5) is False
+    finally:
+        chain.stop(5)
+
+
+def test_stages_run_in_their_own_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As before the chain left bash: a Ctrl+C in the terminal reaches the program,
+    which stops its pipelines itself, not every ffmpeg straight away."""
+    kwargs_seen: list[dict[str, Any]] = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:  # noqa: ANN401
+        kwargs_seen.append(kwargs)
+        return cast("subprocess.Popen[bytes]", real_popen(*args, **kwargs))
+
+    monkeypatch.setattr(procchain.subprocess, "Popen", recording_popen)
+    chain = ProcessChain([CAT])
+    chain.stop(5)
+    assert kwargs_seen[0]["start_new_session"] is True
