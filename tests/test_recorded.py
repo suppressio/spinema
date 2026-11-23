@@ -3,7 +3,6 @@ from, and every disc in tests/discs/ gives its expected files and keeps the
 pipeline invariants of #75 on its own keyframes."""
 import copy
 import json
-import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, override
@@ -313,8 +312,6 @@ def fake_pipelines(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[VirtualFile
 POSITIONS = (0.013, 0.25, 0.5, 0.618, 0.9)      # share of the file
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="bash pipelines and os.killpg, POSIX only until #103")
 @pytest.mark.parametrize("path", recorded_discs(), ids=lambda p: p.stem)
 def test_recorded_disc_pipelines(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                                  fake_pipelines: list[VirtualFile], path: Path) -> None:

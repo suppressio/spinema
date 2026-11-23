@@ -23,9 +23,7 @@ import logging
 import math
 import os
 import shlex
-import signal
 import subprocess
-import sys
 import threading
 import time
 import weakref
@@ -42,6 +40,7 @@ from pipeline import (
     quality_for,
     with_filter_suffix,
 )
+from procchain import ProcessChain
 from sources import Source, ffprobe_json
 from tree import ROOT_ID, FileEntry, Folder, Tree, current_reader
 
@@ -57,7 +56,7 @@ EDGE_CACHE = 8 * 1024 * 1024         # file start and end stay cached (players r
 IDLE_STOP = 120                      # seconds without reads before stopping the pipeline
 TAIL_ALIGN = 47 * 4096               # multiple of both a TS packet (188) and a memory page
 
-COMMON_ARGS = "-g 24 -c:a aac -ac 2 -b:a 192k "
+COMMON_ARGS = ["-g", "24", "-c:a", "aac", "-ac", "2", "-b:a", "192k"]
 AUDIO_TRACK_MUX = 220_000            # TS bit/s per AAC 192k track, with muxer headroom
 MULTI_AUDIO_DIR = "Multi-audio"      # --audio-files both: where the all-tracks files go
 SUB_TAG = "sub"                      # ITAsubENG: Italian audio, English subtitles
@@ -177,33 +176,28 @@ class Generator:
         if loader and vf.loader:
             # same start, so the same timestamps and bytes <-> time mapping as the movie
             # frequent keyframes: the player can start it anywhere
-            cmd = vf.filler_command(f"-stream_loop -1 -i {shlex.quote(vf.loader)}", t0,
-                                    extra="-g 6 ", sbs=is_side_by_side(vf.loader))
+            stages = [vf.filler_command(["-stream_loop", "-1", "-i", vf.loader], t0,
+                                        extra=["-g", "6"], sbs=is_side_by_side(vf.loader))]
             self.ahead_max = LOADER_AHEAD * vf.bytes_per_sec
         else:
-            cmd = decode_command(
+            stages = decode_command(
                 source, start,
-                f"{vf.encode_args} {COMMON_ARGS}"
-                f"-output_ts_offset {t0:.3f} -f mpegts -muxrate {vf.muxrate} -",
+                [*vf.encode_args, *COMMON_ARGS, "-output_ts_offset", f"{t0:.3f}",
+                 "-f", "mpegts", "-muxrate", str(vf.muxrate), "-"],
                 vf.filter_suffix,
             )
             log.info("%s: pipeline from %.1fs (requested %.1fs, offset %d) for %s",
                      vf.path, start, seconds, self.base, self.reader)
             if with_loader:
                 self.loader = Generator(vf, seconds, loader=True)
-        log.debug("  %s", cmd)
-        if not hasattr(os, "killpg"):    # Windows: stop() could not kill the pipeline
-            raise NotImplementedError("pipelines need os.killpg, POSIX only until #103")
+        # the env prefix is shown here, not in stages[0], for the --debug line to stay a
+        # command a person can paste into a shell as it is (docs/DEVELOPMENT.md)
+        env_prefix = "".join(f"{k}={v} " for k, v in source.env.items())
+        log.debug("  %s%s", env_prefix, " | ".join(shlex.join(stage) for stage in stages))
         with open_pipeline_log(vf.log_path, f"{vf.path}: {'loader' if loader else 'pipeline'} "
                                f"from {start:.1f}s") as stderr:
-            self.proc = subprocess.Popen(
-                ["bash", "-o", "pipefail", "-c", cmd],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr,
-                start_new_session=True,
-            )
-        if self.proc.stdout is None:
-            raise RuntimeError("the pipeline has no output pipe")
-        self.stdout_fd = self.proc.stdout.fileno()
+            self.chain = ProcessChain(stages, env=source.env, stderr=stderr)
+        self.stdout_fd = self.chain.stdout.fileno()
         threading.Thread(target=self._pump, daemon=True).start()
 
     @property
@@ -220,11 +214,22 @@ class Generator:
                 if self.stopped:
                     return
             data = os.read(self.stdout_fd, 1 << 20)
-            with self.cond:
-                if not data:
+            if not data:
+                # pipefail: a stage earlier than the last can fail and still leave the
+                # last one reading its truncated output to a clean exit, which would
+                # otherwise look like the pipeline reached the real end of the movie.
+                # Not when it is this end that killed it (stop()): that is not a failure.
+                self.chain.processes[-1].wait()
+                with self.cond:
+                    stopped = self.stopped
+                if not stopped and self.chain.failed():
+                    log.warning("%s: the pipeline failed (a stage exited with an error, "
+                                "see the pipeline log)", self.path)
+                with self.cond:
                     self.eof = True
                     self.cond.notify_all()
-                    return
+                return
+            with self.cond:
                 self.buf += data
                 # never past the end: a pipeline just started from a keyframe far
                 # before the player's position holds less than that, and moving
@@ -295,17 +300,9 @@ class Generator:
         with self.cond:
             self.stopped = True
             self.cond.notify_all()
-        # never started without os.killpg (__init__): Windows, until #103
-        if sys.platform != "win32" and self.proc.poll() is None:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(self.proc.pid, signal.SIGKILL)
-        # SIGKILL waits for a process stuck in the kernel (a drive that does not
+        # killing waits for a process stuck in the kernel (a drive that does not
         # answer a read): do not hang an eject or the program's exit on it
-        try:
-            self.proc.wait(KILL_WAIT)
-        except subprocess.TimeoutExpired:
-            log.warning("%s: the pipeline did not exit %ds after SIGKILL (stuck on the "
-                        "drive?): left behind", self.path, KILL_WAIT)
+        self.chain.stop(KILL_WAIT)
 
 
 class VirtualFile:
@@ -423,9 +420,9 @@ class VirtualFile:
             self.gens.append(g)
             return g
 
-    def filler_command(self, video_input: str, t0: float, duration: float | None = None,
-                       extra: str = "", *, sbs: bool = False) -> str:
-        """ffmpeg writing a stand-in for the movie from second t0: `video_input`
+    def filler_command(self, video_input: list[str], t0: float, duration: float | None = None,
+                       extra: list[str] | None = None, *, sbs: bool = False) -> list[str]:
+        """argv for ffmpeg writing a stand-in for the movie from second t0: `video_input`
         (black, or the loading animation fitted to the picture) and silence, with
         the same streams, timestamps and bitrate the movie has there, so the
         player can go on from one to the other. A 2D input goes in both eyes of a
@@ -435,7 +432,9 @@ class VirtualFile:
         w, h = (int(v) for v in src.frame_size.split("x"))
         eye = w // 2 if not src.two_d else w
         n_audio = max(1, len(src.audio_langs))
-        inputs = " ".join([video_input] + ["-f lavfi -i anullsrc=r=48000:cl=stereo"] * n_audio)
+        inputs = [*video_input]
+        for _ in range(n_audio):
+            inputs += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
 
         def fit(width: int, pre: str = "") -> str:
             return (f"[0:v]{pre}fps={src.frame_rate},"
@@ -449,14 +448,17 @@ class VirtualFile:
         else:                                   # 2D movie: the left eye of a 3D picture
             graph = f"{fit(w, 'crop=iw/2:ih:0:0,' if sbs else '')}[v]"
         graph = with_filter_suffix(graph, self.filter_suffix)
-        maps = " ".join([f"-filter_complex {shlex.quote(graph)} -map '[v]'"] +
-                        [f"-map {i + 1}:a" for i in range(n_audio)])
-        langs = " ".join(f"-metadata:s:a:{i} language={lang}"
-                         for i, lang in enumerate(src.audio_langs))
-        limit = f"-t {duration:.1f} " if duration else ""
-        return (f"ffmpeg -nostdin -v error {inputs} {maps} {langs} {limit}"
-                f"{self.encode_args} {COMMON_ARGS}{extra}"
-                f"-output_ts_offset {t0:.3f} -f mpegts -muxrate {self.muxrate} -")
+        maps = ["-filter_complex", graph, "-map", "[v]"]
+        for i in range(n_audio):
+            maps += ["-map", f"{i + 1}:a"]
+        langs: list[str] = []
+        for i, lang in enumerate(src.audio_langs):
+            langs += [f"-metadata:s:a:{i}", f"language={lang}"]
+        limit = ["-t", f"{duration:.1f}"] if duration else []
+        return (["ffmpeg", "-nostdin", "-v", "error", *inputs, *maps, *langs, *limit,
+                 *self.encode_args, *COMMON_ARGS, *(extra or []),
+                 "-output_ts_offset", f"{t0:.3f}", "-f", "mpegts", "-muxrate", str(self.muxrate),
+                 "-"])
 
     def _synthetic_tail(self) -> bytes:
         """The last EDGE_CACHE bytes, made of black video and silence with the same
@@ -466,9 +468,10 @@ class VirtualFile:
         tail_start = self.tail_start
         length = self.size - tail_start
         t0 = tail_start / self.bytes_per_sec
-        black = f"-f lavfi -i color=black:s={self.source.frame_size}:r={self.source.frame_rate}"
+        black = ["-f", "lavfi", "-i",
+                 f"color=black:s={self.source.frame_size}:r={self.source.frame_rate}"]
         cmd = self.filler_command(black, t0, length / self.bytes_per_sec + 3)
-        out = subprocess.run(["bash", "-c", cmd], capture_output=True, check=False).stdout[:length]
+        out = subprocess.run(cmd, capture_output=True, check=False).stdout[:length]
         return out + null_padding(tail_start + len(out), length - len(out))
 
     def ready_ahead(self, offset: int) -> float:

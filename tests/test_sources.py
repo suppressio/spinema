@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import sys
 import tempfile
@@ -213,9 +212,9 @@ def test_bluray_3d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert [(x.label, x.audio_pids, x.audio_desc) for x in v] == [
         ("ENG", [0x1101], "0x1101 eng dts-hd ma"), ("ITA", [0x1102], "0x1102 ita dts"),
         ("DEU", [0x1103], "0x1103 deu ac3")]
-    assert s.audio_map() == ("-map 1:i:0x1101 -metadata:s:a:0 language=eng "
-                             "-map 1:i:0x1102 -metadata:s:a:1 language=ita "
-                             "-map 1:i:0x1103 -metadata:s:a:2 language=deu")
+    assert s.audio_map() == ["-map", "1:i:0x1101", "-metadata:s:a:0", "language=eng",
+                             "-map", "1:i:0x1102", "-metadata:s:a:1", "language=ita",
+                             "-map", "1:i:0x1103", "-metadata:s:a:2", "language=deu"]
 
 
 def test_bluray_keyframes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -247,28 +246,31 @@ def test_bluray_keyframe_within_its_clip(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 @pytest.mark.skipif(sys.platform == "win32",
-                    reason="3D audio uses os.mkfifo, POSIX only until #103")
+                    reason="3D audio uses os.mkfifo, POSIX only until #192")
 def test_bluray_3d_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     s = bluray(monkeypatch, tmp_path, FakeBluray(), ["ita"],
                env={"LIBAACS_PATH": "libmmbd", "LIBBDPLUS_PATH": "libmmbd"})
     s.sub = s.subs[1]
-    cmd = shlex.split(s.video_command(100.0))
-    assert cmd[:2] == ["LIBAACS_PATH=libmmbd", "LIBBDPLUS_PATH=libmmbd"]
-    assert cmd[3].endswith("disc_reader.py")
-    assert cmd[4:] == [str(tmp_path / "Tron.iso"), "--playlist", "00070", "--start", "100.002",
+    # the decrypt backend's variables are not an argv prefix: the caller (library.py,
+    # procchain.ProcessChain) passes them as the process environment
+    assert s.env == {"LIBAACS_PATH": "libmmbd", "LIBBDPLUS_PATH": "libmmbd"}
+    cmd = s.video_command(100.0)
+    assert cmd[0] == sys.executable
+    assert cmd[1].endswith("disc_reader.py")
+    assert cmd[2:] == [str(tmp_path / "Tron.iso"), "--playlist", "00070", "--start", "100.002",
                        "--audio-pid", "0x1102", "--audio-pid", "0x1201", "--audio-out", cmd[-1]]
     fifo = cmd[-1]
     assert Path(fifo).is_fifo()
     assert s.audio_input(100.0) == \
-        f"-f mpegts -analyzeduration 1000000 -probesize 5000000 -i {fifo}"
+        ["-f", "mpegts", "-analyzeduration", "1000000", "-probesize", "5000000", "-i", fifo]
     # every pipeline start gets a new FIFO, the previous one goes
-    fifo2 = shlex.split(s.video_command(0.0))[-1]
+    fifo2 = s.video_command(0.0)[-1]
     assert fifo2 != fifo and not os.path.exists(fifo) and Path(fifo2).is_fifo()
 
 
 def test_bluray_3d_audio_fifo_is_posix_only(monkeypatch: pytest.MonkeyPatch,
                                             tmp_path: Path) -> None:
-    # Windows has no os.mkfifo: a clear error, not an AttributeError (#103)
+    # Windows has no os.mkfifo: a clear error, not an AttributeError (#192)
     s = bluray(monkeypatch, tmp_path, FakeBluray(), ["ita"])
     monkeypatch.setattr(sources.sys, "platform", "win32")
     with pytest.raises(NotImplementedError, match=r"os\.mkfifo"):
@@ -285,7 +287,7 @@ def test_bluray_2d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert s.name == "Ready Player One"
     assert s.audio_langs == ["ita", "eng"]
     cmd = s.video_command(10.0)
-    assert cmd.endswith("--audio-pid 0x1102 --audio-pid 0x1101 --mode 2d")
+    assert cmd[-6:] == ["--audio-pid", "0x1102", "--audio-pid", "0x1101", "--mode", "2d"]
     assert "--audio-out" not in cmd
 
 
@@ -1218,9 +1220,9 @@ def test_dvd_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert (s.audio_pids, s.audio_langs) == ([0x80, 0x81], ["ita", "eng"])
     assert [(t.stream, t.lang) for t in s.subs] == [(0x20, "ita"), (0x22, "eng")]
     assert [v.label for v in s.variants()] == ["ITA", "ENG"]
-    assert s.audio_map() == ("-map 0:i:0x80 -metadata:s:a:0 language=ita "
-                             "-map 0:i:0x81 -metadata:s:a:1 language=eng")
-    assert s.audio_input(0) == ""
+    assert s.audio_map() == ["-map", "0:i:0x80", "-metadata:s:a:0", "language=ita",
+                             "-map", "0:i:0x81", "-metadata:s:a:1", "language=eng"]
+    assert s.audio_input(0) == []
 
 
 def test_dvd_css_without_libdvdcss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1258,11 +1260,11 @@ def test_temp_files_share_one_folder_removed_at_exit(monkeypatch: pytest.MonkeyP
 def test_dvd_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     s = dvd_source(monkeypatch, tmp_path, ["eng"])
     s.sub = s.subs[1]
-    cmd = shlex.split(s.video_command(61.5))
+    cmd = s.video_command(61.5)
     assert cmd[1].endswith("dvd_reader.py")
     assert cmd[2:] == [str(tmp_path / "BTTF"), "--title", "2", "--start", "61.502",
                        "--audio", "0x81", "--sub", "0x22"]
-    args = shlex.split(s.sub_decoder_args())
+    args = s.sub_decoder_args()
     assert args[0] == "-ifo_palette" and "-canvas_size" not in args
     ifo = Path(args[1]).read_bytes()
     # the main title's palette goes into the first PGC, where ffmpeg reads it
@@ -1270,7 +1272,7 @@ def test_dvd_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     first = pgci + int.from_bytes(ifo[pgci + 12:pgci + 16], "big")
     assert ifo[first + 0xA4:first + 0xA4 + 64] == s.title.palette_raw
     s.forced_only = True
-    assert s.sub_decoder_args().endswith(" -forced_subs_only 1")
+    assert s.sub_decoder_args()[-2:] == ["-forced_subs_only", "1"]
 
 
 def test_open_disc_falls_back_to_dvd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1568,7 +1570,7 @@ def test_mkv_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert [(t.stream, t.lang) for t in s.subs] == [(4, "ita"), (6, "fra")]
     assert [(v.label, v.audio_indexes, v.audio_desc) for v in s.variants()] == [
         ("ITA", [1], "#1 ita dts"), ("ENG", [3], "#3 eng truehd")]
-    assert s.audio_map() == "-map 1:1 -map 1:3"
+    assert s.audio_map() == ["-map", "1:1", "-map", "1:3"]
     s.sub = s.subs[0]
     assert s.sub_ref(1) == "1:4"
     assert mkv(monkeypatch, tmp_path, ["fra", "eng"]).audio_indexes == [3]
@@ -1577,12 +1579,14 @@ def test_mkv_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def test_mkv_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     s = mkv(monkeypatch, tmp_path)
-    quoted = shlex.quote(s.path)
-    assert s.video_command(0) == (f"ffmpeg -nostdin -v error -i {quoted} -map 0:v:0 -c copy "
-                                  "-bsf:v h264_mp4toannexb -f h264 -")
+    assert s.video_command(0) == ["ffmpeg", "-nostdin", "-v", "error", "-i", s.path,
+                                  "-map", "0:v:0", "-c", "copy", "-bsf:v", "h264_mp4toannexb",
+                                  "-f", "h264", "-"]
     # K + 0.2 lands on keyframe K (ffmpeg moves DTS seeks back by 3/23 s)
-    assert "-ss 42.325 -i" in s.video_command(42.125)
-    assert s.audio_input(42.125) == f"-ss 42.125 -i {quoted}"
+    cmd = s.video_command(42.125)
+    i = cmd.index("-ss")
+    assert cmd[i:i + 2] == ["-ss", "42.325"]
+    assert s.audio_input(42.125) == ["-ss", "42.125", "-i", s.path]
     assert s.keyframe_at_or_before(42.5) == 42.125
     assert s.keyframe_at_or_before(0) == 0.0
 
