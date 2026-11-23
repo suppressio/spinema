@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from typing import IO, Any
 
 log = logging.getLogger("bd3d_fs")
-KILL_WAIT = 5      # seconds the started stages get to exit when a later one cannot start
+KILL_WAIT = 5      # seconds killed stages get to exit (library.py has its own, for Generator)
 
 
 class ProcessChain:
@@ -42,10 +42,10 @@ class ProcessChain:
                     stdout=subprocess.PIPE, stderr=stderr, env=full_env,
                     start_new_session=True,
                 )
+                self.processes.append(proc)  # first: whatever fails next, stop() reaches it
                 if upstream is not None:
                     upstream.close()  # the child inherited it already
                 upstream = proc.stdout
-                self.processes.append(proc)
         except BaseException:
             # a stage that cannot start (its program missing) must not leave the
             # earlier ones running, with nothing left to stop them
