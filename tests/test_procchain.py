@@ -13,6 +13,9 @@ import procchain
 from procchain import ProcessChain
 
 CAT = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]
+# exits at once without reading or writing: the chain's output reaches EOF for sure,
+# on every OS, while the stages before it may still be running
+QUIT = [sys.executable, "-c", "pass"]
 
 
 def test_stdout_flows_through_every_stage() -> None:
@@ -121,13 +124,12 @@ def test_a_stage_that_cannot_start_leaves_no_process_behind(
     assert started[0].poll() is not None                  # killed and reaped
 
 
-def test_finish_sees_an_early_stage_failing_after_closing_its_output() -> None:
-    """Stage 0 closes its stdout (the next stage sees EOF and exits 0) and only
-    then exits 1: waiting for the last stage alone and polling the rest would
-    miss that failure."""
-    late_failure = [sys.executable, "-c",
-                    "import os, sys, time; os.close(1); time.sleep(0.5); sys.exit(1)"]
-    chain = ProcessChain([late_failure, CAT])
+def test_finish_sees_an_early_stage_failing_after_the_last_one_exited() -> None:
+    """The last stage exits at once (the chain's output reaches EOF) while stage 0
+    is still running, and only then exits 1: waiting for the last stage alone and
+    polling the rest would miss that failure."""
+    late_failure = [sys.executable, "-c", "import sys, time; time.sleep(0.5); sys.exit(1)"]
+    chain = ProcessChain([late_failure, QUIT])
     try:
         assert chain.stdout.read() == b""
         assert chain.finish(5) is True
@@ -135,9 +137,10 @@ def test_finish_sees_an_early_stage_failing_after_closing_its_output() -> None:
         chain.stop(5)
 
 
-def test_finish_is_bounded_when_a_stage_closes_its_output_but_does_not_exit() -> None:
-    lingering = [sys.executable, "-c", "import os, time; os.close(1); time.sleep(60)"]
-    chain = ProcessChain([lingering])
+def test_finish_is_bounded_when_a_stage_does_not_exit() -> None:
+    """The output reached EOF but a stage is still alive (stuck on the drive)."""
+    lingering = [sys.executable, "-c", "import time; time.sleep(60)"]
+    chain = ProcessChain([lingering, QUIT])
     try:
         assert chain.stdout.read() == b""
         started = time.monotonic()
