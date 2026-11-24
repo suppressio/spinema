@@ -1293,6 +1293,45 @@ def test_open_disc_falls_back_to_dvd(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         open_disc(str(tmp_path / "BTTF"))
 
 
+def test_open_disc_shows_the_error_of_a_recognised_dvd(monkeypatch: pytest.MonkeyPatch,
+                                                       tmp_path: Path) -> None:
+    """A disc the DVD reader recognised (opened, VIDEO_TS.IFO read) that fails later
+    (CSS without libdvdcss) shows its own error, not the Blu-ray one (#188)."""
+    def no_bluray(path: str) -> None:
+        raise OSError("not a Blu-ray")
+
+    monkeypatch.setattr(sources, "_open_disc", no_bluray)
+    monkeypatch.setattr(dvd, "Dvd", FakeDvd)
+    monkeypatch.setattr(FakeDvd, "scrambled", True)
+    (tmp_path / "BTTF").mkdir()
+    with pytest.raises(OSError, match=r"encrypted \(CSS\)"):
+        open_disc(str(tmp_path / "BTTF"))
+
+
+@pytest.mark.parametrize("dvd_failure", ["open", "ifo"])
+def test_open_disc_shows_the_bluray_error_when_no_dvd_is_recognised(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dvd_failure: str) -> None:
+    """DVDOpen fails, or VIDEO_TS.IFO cannot be read: the Blu-ray error, unchanged (#188)."""
+    bd_error = OSError("cannot decrypt the Blu-ray (AACS)")
+
+    def no_bluray(path: str) -> None:
+        raise bd_error
+
+    class NoIfo(FakeDvd):
+        def ifo(self, vts: int) -> bytes:
+            raise OSError("cannot read VIDEO_TS.IFO")
+
+    def cannot_open(path: str) -> None:
+        raise OSError("cannot open DVD")
+
+    monkeypatch.setattr(sources, "_open_disc", no_bluray)
+    monkeypatch.setattr(dvd, "Dvd", cannot_open if dvd_failure == "open" else NoIfo)
+    (tmp_path / "BTTF").mkdir()
+    with pytest.raises(OSError, match=r"cannot decrypt the Blu-ray \(AACS\)") as err:
+        open_disc(str(tmp_path / "BTTF"))
+    assert err.value is bd_error
+
+
 # --- --dump-structure ----------------------------------------------------------
 
 # keyframes at irregular times (an open GOP here, a scene cut there), as on real
