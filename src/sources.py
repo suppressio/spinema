@@ -1043,7 +1043,10 @@ class DvdSource(DiscSource):
         except DvdError:
             raise
         except OSError as e:
-            raise DvdError(*e.args) from e
+            # errno, message and file name kept: the log still names the file
+            args = e.args if e.errno is None else (e.errno, e.strerror, e.filename, None,
+                                                   e.filename2)
+            raise DvdError(*args) from e
 
     @classmethod
     def _sources(cls, path: str, parsed: list[dvd.DvdTitle], audio_langs: list[str] | None,
