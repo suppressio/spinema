@@ -189,7 +189,7 @@ def test_audio_tap_ffmpeg_goes_away() -> None:
 class FakeSocket:
     """A connected socket for AudioTap: its own address and peer, what sendall does."""
 
-    def __init__(self, me: tuple[str, int], peer: tuple[str, int],
+    def __init__(self, me: tuple[str, int], peer: tuple[str, int] | None,
                  fail: OSError | None = None) -> None:
         self.me, self.peer, self.fail, self.closed = me, peer, fail, False
 
@@ -197,6 +197,8 @@ class FakeSocket:
         return self.me
 
     def getpeername(self) -> tuple[str, int]:
+        if self.peer is None:            # reset by the other side as soon as accepted
+            raise OSError(107, "Transport endpoint is not connected")
         return self.peer
 
     def settimeout(self, value: float | None) -> None:
@@ -216,11 +218,14 @@ class FakeSocket:
         self.close()
 
 
-def test_audio_tap_drops_a_socket_connected_to_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("case", ["itself", "reset"])
+def test_audio_tap_drops_an_unusable_socket(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
     """TCP simultaneous open (source port == target port) connects a socket to itself,
-    holding the port ffmpeg needs: the tap closes it and tries again."""
+    holding the port ffmpeg needs; or the connection is reset as soon as accepted:
+    the tap closes it and tries again."""
     ffmpeg = Receiver()
-    itself = FakeSocket(("127.0.0.1", ffmpeg.port), ("127.0.0.1", ffmpeg.port))
+    me = ("127.0.0.1", ffmpeg.port)
+    itself = FakeSocket(me, me if case == "itself" else None)
     real = socket.create_connection
     attempts: list[object] = []
 
