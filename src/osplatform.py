@@ -174,7 +174,7 @@ def has_library(name: str) -> bool:
 
 
 def default_temp_dir() -> str:
-    """Where this run's temporary files (the pipeline log, audio FIFOs, IFO
+    """Where this run's temporary files (the pipeline log, IFO
     copies) go by default."""
     if WINDOWS:
         return os.environ.get("TEMP") or str(Path.home() / "AppData" / "Local" / "Temp")

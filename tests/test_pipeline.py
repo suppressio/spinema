@@ -1,5 +1,4 @@
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -180,8 +179,6 @@ def three_d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> BlurayDiscSource
     return BlurayDiscSource(str(tmp_path / "t.iso"), ["ita"])
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="3D audio uses os.mkfifo, POSIX only until #192")
 def test_decode_3d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     s = three_d(monkeypatch, tmp_path)
     assert quality_for(s, "light") == QUALITIES[("3d", "light")]
@@ -193,8 +190,6 @@ def test_decode_3d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
                          "-map", "0:v", *s.audio_map(), "OUT"]
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="3D audio uses os.mkfifo, POSIX only until #192")
 def test_decode_3d_subtitles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     s = three_d(monkeypatch, tmp_path)
     s.sub, s.sub_depth = s.subs[0], 10
@@ -212,8 +207,6 @@ def test_decode_3d_subtitles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert ffmpeg[i:i + 4] == ["-canvas_size", "1920x1080", "-forced_subs_only", "1"]
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="3D audio uses os.mkfifo, POSIX only until #192")
 def test_decode_3d_filter_suffix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The 3D path without subtitles has no filter_complex at all today (plain
     -map 0:v): a non-empty filter_suffix (VAAPI) must still get one, with the

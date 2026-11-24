@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -311,8 +312,21 @@ def _run_dir() -> str:
 
 
 def _temp_file(name: str) -> str:
-    """A path for a file of this run (audio FIFOs, IFO copies)."""
+    """A path for a file of this run (IFO copies)."""
     return os.path.join(_run_dir(), f"{next(_temp_ids)}-{name}")
+
+
+# 3D audio over loopback TCP (#192): how long ffmpeg waits for disc_reader to connect
+AUDIO_LISTEN_TIMEOUT_MS = 60_000
+
+
+def _free_port() -> int:
+    """A loopback port nobody uses now, for ffmpeg to listen on. Closed again at
+    once: the short gap before ffmpeg binds it is accepted (loopback only, #192)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port: int = s.getsockname()[1]
+        return port
 
 
 def _decrypt_backends() -> list[dict[str, str]]:
@@ -968,7 +982,7 @@ class BlurayDiscSource(DiscSource):
         self.audio_langs = [a.lang for a in chosen_audio]
         self.audio_desc = ", ".join(f"{a.pid:#x} {a.lang} {a.codec}"
                                     for a in chosen_audio) or "none"
-        self._fifo: str | None = None
+        self._audio_port: int | None = None
 
     @override
     def keyframe_at_or_before(self, seconds: float) -> float:
@@ -992,22 +1006,21 @@ class BlurayDiscSource(DiscSource):
                "--playlist", self.playlist, "--start", f"{start + 0.002:.3f}", *pids]
         if self.two_d:
             return [*cmd, "--mode", "2d"]
-        # 3D: one FIFO per pipeline start, disc_reader writes the audio TS into it
-        if self._fifo and os.path.exists(self._fifo):
-            os.unlink(self._fifo)
-        if sys.platform == "win32":
-            raise NotImplementedError("3D audio goes through a FIFO (os.mkfifo): POSIX only "
-                                      "until #192")
-        self._fifo = _temp_file("audio.ts")
-        os.mkfifo(self._fifo)
-        return [*cmd, "--audio-out", self._fifo]
+        # 3D: one port per pipeline start; ffmpeg listens on it, disc_reader connects
+        # and sends the audio TS (loopback TCP, the same on every platform, #192)
+        self._audio_port = _free_port()
+        return [*cmd, "--audio-port", str(self._audio_port)]
 
     @override
     def audio_input(self, start: float) -> list[str]:
-        if self._fifo is None:
+        if self._audio_port is None:
             raise ValueError("audio_input() before video_command()")
+        # listen_timeout: disc_reader never connects (it gives up on its own side
+        # after disc_reader.AUDIO_CONNECT_TIMEOUT, the same 60 s)
+        url = (f"tcp://127.0.0.1:{self._audio_port}"
+               f"?listen=1&listen_timeout={AUDIO_LISTEN_TIMEOUT_MS}")
         return ["-f", "mpegts", "-analyzeduration", "1000000", "-probesize", "5000000",
-                "-i", self._fifo]
+                "-i", url]
 
 
 class DvdError(OSError):

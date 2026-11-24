@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -60,7 +61,7 @@ from tree import Tree
 
 @pytest.fixture(autouse=True)
 def private_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """FIFOs and IFO copies go in the test's own temporary folder."""
+    """IFO copies go in the test's own temporary folder."""
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     sources._run_dir.cache_clear()
 
@@ -245,12 +246,14 @@ def test_bluray_keyframe_within_its_clip(monkeypatch: pytest.MonkeyPatch, tmp_pa
     within_clip()
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="3D audio uses os.mkfifo, POSIX only until #192")
-def test_bluray_3d_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("platform", ["linux", "win32", "darwin"])
+def test_bluray_3d_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                            platform: str) -> None:
     s = bluray(monkeypatch, tmp_path, FakeBluray(), ["ita"],
                env={"LIBAACS_PATH": "libmmbd", "LIBBDPLUS_PATH": "libmmbd"})
     s.sub = s.subs[1]
+    # 3D audio over loopback TCP: the same commands on every platform (#192)
+    monkeypatch.setattr(sources.sys, "platform", platform)
     # the decrypt backend's variables are not an argv prefix: the caller (library.py,
     # procchain.ProcessChain) passes them as the process environment
     assert s.env == {"LIBAACS_PATH": "libmmbd", "LIBBDPLUS_PATH": "libmmbd"}
@@ -258,23 +261,17 @@ def test_bluray_3d_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert cmd[0] == sys.executable
     assert cmd[1].endswith("disc_reader.py")
     assert cmd[2:] == [str(tmp_path / "Tron.iso"), "--playlist", "00070", "--start", "100.002",
-                       "--audio-pid", "0x1102", "--audio-pid", "0x1201", "--audio-out", cmd[-1]]
-    fifo = cmd[-1]
-    assert Path(fifo).is_fifo()
+                       "--audio-pid", "0x1102", "--audio-pid", "0x1201", "--audio-port", cmd[-1]]
+    port = int(cmd[-1])
+    assert 0 < port < 65536
+    with socket.socket() as free:        # nobody holds the port: ffmpeg can listen on it
+        free.bind(("127.0.0.1", port))
     assert s.audio_input(100.0) == \
-        ["-f", "mpegts", "-analyzeduration", "1000000", "-probesize", "5000000", "-i", fifo]
-    # every pipeline start gets a new FIFO, the previous one goes
-    fifo2 = s.video_command(0.0)[-1]
-    assert fifo2 != fifo and not os.path.exists(fifo) and Path(fifo2).is_fifo()
-
-
-def test_bluray_3d_audio_fifo_is_posix_only(monkeypatch: pytest.MonkeyPatch,
-                                            tmp_path: Path) -> None:
-    # Windows has no os.mkfifo: a clear error, not an AttributeError (#192)
-    s = bluray(monkeypatch, tmp_path, FakeBluray(), ["ita"])
-    monkeypatch.setattr(sources.sys, "platform", "win32")
-    with pytest.raises(NotImplementedError, match=r"os\.mkfifo"):
-        s.video_command(100.0)
+        ["-f", "mpegts", "-analyzeduration", "1000000", "-probesize", "5000000",
+         "-i", f"tcp://127.0.0.1:{port}?listen=1&listen_timeout=60000"]
+    # every pipeline start gets its own port, and audio_input() follows it
+    port2 = int(s.video_command(0.0)[-1])
+    assert s.audio_input(0.0)[-1] == f"tcp://127.0.0.1:{port2}?listen=1&listen_timeout=60000"
 
 
 def test_bluray_2d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
