@@ -35,7 +35,7 @@ from builders import (
     vmg_ifo,
     vts_ifo,
 )
-from fakes import EPS, FakeBluray, FakeDvd, mkv_probe, opener, pack
+from fakes import EPS, FakeBluray, FakeDvd, FakeVobs, mkv_probe, opener, pack
 from library import Library, VirtualFile
 from lookup import Role
 from sources import (
@@ -1306,6 +1306,20 @@ def test_open_disc_shows_the_error_of_a_recognised_dvd(monkeypatch: pytest.Monke
     (tmp_path / "BTTF").mkdir()
     with pytest.raises(OSError, match=r"encrypted \(CSS\)"):
         open_disc(str(tmp_path / "BTTF"))
+
+
+def test_dvd_error_keeps_the_file_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A recognised DVD whose file goes missing: DvdError, errno and file name kept."""
+    class NoVobs(FakeDvd):
+        @override
+        def title_vobs(self, vts: int) -> FakeVobs:
+            raise FileNotFoundError(2, "No such file", "/x/VTS_02_1.VOB")
+
+    monkeypatch.setattr(dvd, "Dvd", NoVobs)
+    (tmp_path / "BTTF").mkdir()
+    with pytest.raises(sources.DvdError, match=r"VTS_02_1\.VOB") as err:
+        DvdSource.all_on(str(tmp_path / "BTTF"))
+    assert err.value.errno == 2 and err.value.filename == "/x/VTS_02_1.VOB"
 
 
 @pytest.mark.parametrize("dvd_failure", ["open", "ifo"])
