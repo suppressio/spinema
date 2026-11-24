@@ -201,6 +201,11 @@ class AudioTap:
             except OSError:              # refused (or, on Windows, timed out)
                 self.abort.wait(AUDIO_CONNECT_RETRY)
                 continue
+            if sock.getsockname() == sock.getpeername():
+                # TCP simultaneous open: connected to itself, and holding the port
+                # ffmpeg must listen on. Let it go and try again
+                sock.close()
+                continue
             sock.settimeout(None)
             return sock
         if not self.abort.is_set():
@@ -216,7 +221,7 @@ class AudioTap:
                     while (chunk := self.q.get()) is not None:
                         sock.sendall(chunk)
                     return
-        except ConnectionError:          # ffmpeg stopped reading (end, seek, stop)
+        except OSError:                  # ffmpeg stopped reading (end, seek, stop)
             pass
         while self.q.get() is not None:  # nobody reads: keep the video going
             pass
