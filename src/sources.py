@@ -1010,6 +1010,12 @@ class BlurayDiscSource(DiscSource):
                 "-i", self._fifo]
 
 
+class DvdError(OSError):
+    """A disc the DVD reader recognised (opened, VIDEO_TS.IFO read) that then fails
+    for its own reason (CSS without libdvdcss, no playable title...): open_disc()
+    shows this error, not the Blu-ray one it got first (#188)."""
+
+
 class DvdSource(DiscSource):
     """A title of a DVD-Video: the movie, or one episode of a series (drive, ISO
     or folder with VIDEO_TS/, read by dvd_reader.py). all_on() finds them."""
@@ -1028,18 +1034,29 @@ class DvdSource(DiscSource):
                lookup_enabled: bool = False) -> list["DvdSource"]:
         """The movie, or one source per episode (named like Blu-ray episodes, #127).
         `lookup_enabled` (--lookup, #84, #69): as on Blu-ray, TheDiscDB's roles and
-        titles, by the disc's title numbers; off by default, no network touched."""
+        titles, by the disc's title numbers; off by default, no network touched.
+        Once the disc is recognised as a DVD, its errors are a DvdError (#188)."""
+        with dvd.Dvd(path) as disc:
+            parsed = dvd.all_titles(disc)
+        try:
+            return cls._sources(path, parsed, audio_langs, lookup_enabled)
+        except DvdError:
+            raise
+        except OSError as e:
+            raise DvdError(*e.args) from e
+
+    @classmethod
+    def _sources(cls, path: str, parsed: list[dvd.DvdTitle], audio_langs: list[str] | None,
+                 lookup_enabled: bool) -> list["DvdSource"]:
         def key(t: dvd.DvdTitle) -> str:
             return f"{t.number:02d}"
 
-        with dvd.Dvd(path) as disc:
-            parsed = dvd.all_titles(disc)
-            chosen = dvd.choose_titles(parsed)
-            # a title with no cell (a copy-protection dummy) cannot play, whatever its role
-            playable = [t for t in parsed if t.cells]
-            roles: dict[str, lookup.Role] = {}
-            if lookup_enabled and len(playable) >= 2:
-                roles = _online_roles(path, _dvd_content_hash(path), [key(t) for t in playable])
+        chosen = dvd.choose_titles(parsed)
+        # a title with no cell (a copy-protection dummy) cannot play, whatever its role
+        playable = [t for t in parsed if t.cells]
+        roles: dict[str, lookup.Role] = {}
+        if lookup_enabled and len(playable) >= 2:
+            roles = _online_roles(path, _dvd_content_hash(path), [key(t) for t in playable])
         choice = _choice_by_role(
             playable, roles, key=key, sig=lambda t: (t.vts, t.cells[0].first if t.cells else 0),
             is_3d=lambda _: False, has_3d=False)
@@ -1171,6 +1188,8 @@ def open_disc(path: str, audio_langs: list[str] | None = None, *,
     except OSError as bd_error:
         try:
             return list(DvdSource.all_on(path, audio_langs, lookup_enabled=lookup_enabled))
+        except DvdError:
+            raise                   # a DVD after all: its own error (#188)
         except OSError:
             raise bd_error from None
 
