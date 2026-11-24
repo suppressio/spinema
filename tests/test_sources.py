@@ -285,7 +285,7 @@ def test_bluray_2d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert s.audio_langs == ["ita", "eng"]
     cmd = s.video_command(10.0)
     assert cmd[-6:] == ["--audio-pid", "0x1102", "--audio-pid", "0x1101", "--mode", "2d"]
-    assert "--audio-out" not in cmd
+    assert "--audio-port" not in cmd
 
 
 @pytest.mark.parametrize("three_d", [False, True])

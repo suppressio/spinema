@@ -2,10 +2,11 @@ import io
 import socket
 import threading
 import time
-from typing import override
+from typing import Self, override
 
 import pytest
 
+import disc_reader
 from builders import pes, pmt_packet, pmt_section, source_packets, ts_packets
 from disc_reader import (
     AudioTap,
@@ -175,6 +176,7 @@ def test_audio_tap_ffmpeg_goes_away() -> None:
     """ffmpeg closes its end (seek, stop): the tap keeps draining, close() returns."""
     server = socket.create_server(("127.0.0.1", 0))
     tap = AudioTap(server.getsockname()[1], {AUDIO}, KEY_PTS)
+    server.settimeout(10)
     conn = server.accept()[0]
     conn.close()
     server.close()
@@ -182,6 +184,73 @@ def test_audio_tap_ffmpeg_goes_away() -> None:
     for _ in range(5000):
         tap.feed(data)
     tap.close()
+
+
+class FakeSocket:
+    """A connected socket for AudioTap: its own address and peer, what sendall does."""
+
+    def __init__(self, me: tuple[str, int], peer: tuple[str, int],
+                 fail: OSError | None = None) -> None:
+        self.me, self.peer, self.fail, self.closed = me, peer, fail, False
+
+    def getsockname(self) -> tuple[str, int]:
+        return self.me
+
+    def getpeername(self) -> tuple[str, int]:
+        return self.peer
+
+    def settimeout(self, value: float | None) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        if self.fail:
+            raise self.fail
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def test_audio_tap_drops_a_socket_connected_to_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TCP simultaneous open (source port == target port) connects a socket to itself,
+    holding the port ffmpeg needs: the tap closes it and tries again."""
+    ffmpeg = Receiver()
+    itself = FakeSocket(("127.0.0.1", ffmpeg.port), ("127.0.0.1", ffmpeg.port))
+    real = socket.create_connection
+    attempts: list[object] = []
+
+    def connect(address: tuple[str, int], timeout: float | None = None) -> object:
+        attempts.append(address)
+        return itself if len(attempts) == 1 else real(address, timeout=timeout)
+
+    monkeypatch.setattr(disc_reader.socket, "create_connection", connect)
+    tap = AudioTap(ffmpeg.port, {AUDIO}, KEY_PTS)
+    tap.feed(source_packets(disc_stream()))
+    tap.close()
+    assert itself.closed and len(attempts) == 2
+    assert AUDIO in {pid for pid, _ in pids_and_pts(ffmpeg.received())}
+
+
+def test_audio_tap_survives_any_send_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not only reset/broken pipe: any OSError while sending (a timeout, Windows'
+    WSAENETRESET) leaves the tap draining, so the video never stalls."""
+    failing = FakeSocket(("127.0.0.1", 1), ("127.0.0.1", 2), fail=TimeoutError("timed out"))
+
+    def connect(address: tuple[str, int], timeout: float | None = None) -> object:
+        return failing
+
+    monkeypatch.setattr(disc_reader.socket, "create_connection", connect)
+    tap = AudioTap(2, {AUDIO}, KEY_PTS)
+    data = source_packets(disc_stream())
+    for _ in range(5000):                # more than the queue holds
+        tap.feed(data)
+    tap.close()
+    assert failing.closed
 
 
 def test_remux_2d() -> None:
