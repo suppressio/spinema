@@ -18,6 +18,7 @@ streams, picture size, timestamps.
 import hashlib
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -115,21 +116,24 @@ def reference(source: Source) -> Reference:
     return Reference(_reference_key(source))
 
 
-def _read_command(cmd: list[str], size: int, fifo: str | None = None,
+def _read_command(cmd: list[str], size: int, audio_port: int | None = None,
                   env: dict[str, str] | None = None) -> tuple[bytes, bytes]:
     """The first `size` bytes a reader command (argv) writes, and the first 256 KB
-    of the audio it writes into `fifo` (3D Blu-ray). `env`: the source's variables
-    over os.environ (the decryption backend, LIBAACS_PATH and LIBBDPLUS_PATH)."""
+    of the audio it sends to 127.0.0.1:`audio_port` (3D Blu-ray), where this test
+    listens as ffmpeg would. `env`: the source's variables over os.environ (the
+    decryption backend, LIBAACS_PATH and LIBBDPLUS_PATH)."""
     audio = bytearray()
+    server = socket.create_server(("127.0.0.1", audio_port)) if audio_port else None
 
     def drain() -> None:
-        with Path(str(fifo)).open("rb") as f:
-            while len(audio) < 256 * 1024 and (chunk := f.read(65536)):
+        assert server is not None
+        with server, server.accept()[0] as conn:
+            while len(audio) < 256 * 1024 and (chunk := conn.recv(65536)):
                 audio.extend(chunk)
-            while f.read(1 << 20):                         # keep it flowing until the end
+            while conn.recv(1 << 20):                      # keep it flowing until the end
                 pass
 
-    reader = threading.Thread(target=drain, daemon=True) if fifo else None
+    reader = threading.Thread(target=drain, daemon=True) if server else None
     if reader:
         reader.start()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -171,9 +175,9 @@ def test_keyframes(source: Source, reference: Reference) -> None:
 def _decoder_input(source: Source, at: float) -> tuple[bytes, bytes]:
     start = source.keyframe_at_or_before(at)
     cmd = source.video_command(start)
-    fifo = getattr(source, "_fifo", None) if isinstance(source, BlurayDiscSource) and \
-        not source.two_d else None
-    return _read_command(cmd, 12 * 1024 * 1024, fifo, source.env)
+    port = int(cmd[cmd.index("--audio-port") + 1]) if isinstance(source, BlurayDiscSource) \
+        and not source.two_d else None
+    return _read_command(cmd, 12 * 1024 * 1024, port, source.env)
 
 
 def test_decoder_input(source: Source, reference: Reference) -> None:

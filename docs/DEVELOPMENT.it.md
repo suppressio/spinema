@@ -42,7 +42,7 @@ Come avviare il programma da un clone, dove stanno le cose nel codice, cosa cont
 | `src/bluray.py` | Un piccolo collegamento ctypes a libbluray: apre un disco, una ISO o una cartella, e ne legge i file decifrati. |
 | `src/osplatform.py` | Le chiamate che cambiano da un sistema operativo all'altro: lo stato del lettore, i lettori da guardare, il caricamento di una libreria condivisa, e la cartella temporanea e il percorso del log predefiniti. Oggi è implementato solo Linux. Si chiama osplatform, non platform, per non nascondere il modulo omonimo della libreria standard. |
 | `src/bdmv.py` | I file di navigazione del Blu-ray: playlist (MPLS), informazioni sulle clip (CLPI), il salto nel `.ssif`. |
-| `src/disc_reader.py` | Legge un titolo Blu-ray da un certo istante. 3D: il video per edge264 su stdout e l'audio in una FIFO. 2D: un solo flusso TS filtrato. Gira come processo a sé. |
+| `src/disc_reader.py` | Legge un titolo Blu-ray da un certo istante. 3D: il video per edge264 su stdout e l'audio a ffmpeg via TCP su loopback. 2D: un solo flusso TS filtrato. Gira come processo a sé. |
 | `src/ssif_demux.py` | Divide il flusso 3D `.ssif` in H.264 più MVC per edge264. |
 | `src/dvd.py` | libdvdread tramite ctypes, i file IFO, la scelta del titolo principale o degli episodi, e il salto preciso. |
 | `src/dvd_reader.py` | Legge un titolo DVD da un certo istante come flusso MPEG program per FFmpeg. Gira come processo a sé. |
@@ -77,7 +77,7 @@ scripts/check.sh --integration    # anche i test sul disco nel lettore
 - **shellcheck**: gli script in `scripts/` e `docker/`;
 - **gli unit test**.
 
-Al primo avvio crea `.venv` con gli strumenti alle versioni fissate in `requirements-dev.txt`. Le dipendenze del programma vengono dal sistema. GitHub esegue lo stesso script su Ubuntu 24.04, macOS e Windows (`.github/workflows/check.yml`): gli unit test, ruff e pyright restano verdi su tutti e tre mentre il refactor v1.3 rende portabile il nucleo; su macOS e Windows si saltano le parti ancora legate a Linux (FUSE, l'ioctl del lettore, `os.mkfifo`, il test di arresto con SIGTERM; `dpkg` per i controlli sulla versione Debian) e non girano i test di integrazione (lì niente disco, niente FUSE). Uno skip di pytest non nasconde il codice a pyright: una chiamata solo POSIX sta dietro `if sys.platform != "win32"` (o dopo `if sys.platform == "win32": raise ...`), che pyright legge come confine di piattaforma.
+Al primo avvio crea `.venv` con gli strumenti alle versioni fissate in `requirements-dev.txt`. Le dipendenze del programma vengono dal sistema. GitHub esegue lo stesso script su Ubuntu 24.04, macOS e Windows (`.github/workflows/check.yml`): gli unit test, ruff e pyright restano verdi su tutti e tre mentre il refactor v1.3 rende portabile il nucleo; su macOS e Windows si saltano le parti ancora legate a Linux (FUSE, l'ioctl del lettore, il test di arresto con SIGTERM; `dpkg` per i controlli sulla versione Debian) e non girano i test di integrazione (lì niente disco, niente FUSE). Uno skip di pytest non nasconde il codice a pyright: una chiamata solo POSIX sta dietro `if sys.platform != "win32"` (o dopo `if sys.platform == "win32": raise ...`), che pyright legge come confine di piattaforma.
 
 ### Unit test (`tests/`)
 
