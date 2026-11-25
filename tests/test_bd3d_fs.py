@@ -16,10 +16,11 @@ from unittest.mock import Mock
 import pytest
 
 import bd3d_fs
+import osplatform
 import sources
 from fakes import FakeBluray, opener
 from library import Library
-from osplatform import DriveStatus
+from osplatform import DriveStatus, default_mount_point
 from sources import Source, UnsupportedDiscError
 from test_library import DiscSource
 from tree import FileEntry, Tree
@@ -320,12 +321,54 @@ def test_http_port_accepts_a_real_port() -> None:
     assert bd3d_fs.build_parser().parse_args(["--http-port", "8200", "x.mkv"]).http_port == 8200
 
 
-def test_mount_default_is_disks_inside_the_installed_share() -> None:
-    # the installer only creates /srv/spinema: spinema mounts Disks inside it (#196)
-    assert bd3d_fs.build_parser().parse_args(["x.mkv"]).mount == "/srv/spinema/Disks"
+def test_mount_default_is_the_platform_one() -> None:
+    # the installer only creates the shared folder: spinema mounts Disks inside it
+    # (#196 on Linux, #106 on Windows)
+    assert bd3d_fs.build_parser().parse_args(["x.mkv"]).mount == default_mount_point()
 
 
-def test_mount_point_is_created_group_writable(tmp_path: Path) -> None:
+def test_mount_point_on_windows_is_left_to_winfsp(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # WinFsp creates the mount folder itself and fails if it exists: only its
+    # parent is made, e.g. share/ when started by hand outside the installer
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    mount = tmp_path / "share" / "Disks"
+    bd3d_fs.prepare_mount_point(str(mount))
+    assert mount.parent.is_dir()
+    assert not mount.exists()
+
+
+def test_mount_point_existing_on_windows_means_spinema_is_running(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # WinFsp deletes its folder on unmount, and Windows on a crash: one still
+    # there is another spinema's mount, or a folder someone made
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    mount = tmp_path / "Disks"
+    mount.mkdir()
+    with pytest.raises(SystemExit) as error:
+        bd3d_fs.prepare_mount_point(str(mount))
+    message = str(error.value)
+    assert "Is spinema already running?" in message
+    assert "delete the folder" in message
+
+
+def test_mount_point_parent_not_writable_on_windows(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # the installer grants the user Modify on share\ only
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    mount = str(tmp_path / "share" / "Disks")
+    monkeypatch.setattr(bd3d_fs.os, "makedirs",
+                        Mock(side_effect=PermissionError(13, "Permission denied", mount)))
+    with pytest.raises(SystemExit) as error:
+        bd3d_fs.prepare_mount_point(mount)
+    message = str(error.value)
+    assert f"cannot create the folder of {mount}" in message
+    assert "group spinema" not in message
+
+
+def test_mount_point_is_created_group_writable(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", False)   # Linux's own
     # the .deb's /srv/spinema is shared by group spinema: whoever starts spinema
     # first creates Disks, and the other members must be able to mount on it too
     mount = tmp_path / "spinema" / "Disks"
@@ -337,6 +380,7 @@ def test_mount_point_is_created_group_writable(tmp_path: Path) -> None:
 
 def test_mount_point_left_by_a_crash_says_how_to_free_it(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", False)   # Linux's own
     # a FUSE mount left by a crash: isdir() is False (ENOTCONN), mkdir says EEXIST
     mount = str(tmp_path / "Disks")
     monkeypatch.setattr(bd3d_fs.os, "makedirs",
@@ -348,6 +392,7 @@ def test_mount_point_left_by_a_crash_says_how_to_free_it(
 
 def test_mount_point_not_writable_is_a_clear_message(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", False)   # Linux's own
     # e.g. a .deb user added to group spinema who has not logged in again yet
     mount = str(tmp_path / "Disks")
     monkeypatch.setattr(bd3d_fs.os, "makedirs",
@@ -400,8 +445,30 @@ def test_dlna_only_does_not_need_fuse() -> None:
     assert done.stdout.strip() == "ok", done.stderr
 
 
+def test_require_samba_on_windows_needs_no_smbd(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows shares with its own SMB server: no Samba to look for
+    which = Mock(return_value=None)
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setattr(bd3d_fs.shutil, "which", which)
+    bd3d_fs.require_samba("samba")
+    which.assert_not_called()
+
+
+def test_require_fuse_without_winfsp_says_to_install_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # mfusepy raises OSError, not ImportError, when it finds no WinFsp
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setattr(bd3d_fs.importlib, "import_module",
+                        Mock(side_effect=OSError("Unable to find libfuse")))
+    with pytest.raises(SystemExit) as error:
+        bd3d_fs.require_fuse("samba")
+    message = str(error.value)
+    assert "Unable to find libfuse" in message
+    assert "install WinFsp" in message
+
+
 def test_require_samba_looks_in_sbin(monkeypatch: pytest.MonkeyPatch) -> None:
     # Debian: smbd is in /usr/sbin, and a normal user's PATH has no sbin
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     which = Mock(return_value="/usr/sbin/smbd")
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/local/bin", "/usr/bin", "/bin"]))
     monkeypatch.setattr(bd3d_fs.shutil, "which", which)
@@ -415,6 +482,7 @@ def test_require_samba_looks_in_sbin(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("missing", [None, "samba", "fuse"])
 def test_share_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                             share: str, missing: str | None) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", False)   # Linux's own
     fuse = Mock()
     which = Mock(return_value=None if missing == "samba" else "/usr/sbin/smbd")
     import_module = Mock(wraps=bd3d_fs.importlib.import_module)

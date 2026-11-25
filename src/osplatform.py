@@ -1,7 +1,8 @@
 """
 osplatform.py — the handful of calls that differ by operating system: whether a
 disc is in a drive, which drives to look at by default, how to load a shared
-library, and where temporary files and the program's log go by default. Linux,
+library, where temporary files, the program's log and the FUSE mount go by
+default, and how FUSE differs (libfuse3 or WinFsp). Linux,
 macOS and Windows are implemented; a further port adds branches here instead
 of touching every module that assumes one platform today.
 
@@ -16,6 +17,7 @@ import ctypes.util
 import glob
 import os
 import string
+import subprocess
 import sys
 from ctypes import wintypes
 from enum import Enum, auto
@@ -192,3 +194,63 @@ def default_program_log() -> Path:
         return Path.home() / "Library" / "Logs" / "spinema" / "spinema.log"
     state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
     return Path(state) / "spinema" / "spinema.log"
+
+
+def default_mount_point() -> str:
+    """Where the files are mounted by default (--mount to change it): Disks
+    inside the folder the installer shares, never the shared folder itself.
+    On Windows a mount folder cannot be shared, its parent can (#102)."""
+    if WINDOWS:
+        program_files = os.environ.get("PROGRAMFILES") or "C:\\Program Files"
+        return str(Path(program_files) / "Spinema" / "share" / "Disks")
+    return "/srv/spinema/Disks"
+
+
+def fuse_creates_mount_point() -> bool:
+    """Whether FUSE makes the mount folder itself: WinFsp creates it (a junction)
+    and deletes it on unmount, and fails if it exists; libfuse mounts on a
+    folder that exists already."""
+    return WINDOWS
+
+
+def fuse_library() -> str | None:
+    """The FUSE library for mfusepy (FUSE_LIBRARY_PATH): libfuse3 by name, as
+    mfusepy picks libfuse 2 when both are installed. None on Windows, where
+    mfusepy finds WinFsp's DLL from the registry."""
+    if WINDOWS:
+        return None
+    path = ctypes.util.find_library("fuse3")
+    if path is None:
+        raise ImportError("libfuse3 not found")
+    return path
+
+
+def fuse_owner() -> tuple[int, int]:
+    """Who owns the files (uid, gid), as FUSE mount options: the user who mounts. WinFsp
+    reads -1 as that user; any other number maps to some SID of its own."""
+    # sys.platform too: pyright knows os.getuid is POSIX only from that alone
+    if WINDOWS or sys.platform == "win32":
+        return -1, -1
+    return os.getuid(), os.getgid()
+
+
+def force_unmount(mount_point: str) -> None:
+    """Unmount a FUSE mount whose loop did not stop. Lazily on Linux (Samba may
+    hold files open). Nothing on Windows: WinFsp has no such command, and its
+    volume goes with the process."""
+    if not WINDOWS:
+        subprocess.run(["fusermount3", "-u", "-z", mount_point], check=False)
+
+
+def fuse_install_hint(share: str) -> str:
+    """How to get FUSE, for the error when it is missing."""
+    if WINDOWS:
+        return "install WinFsp (https://winfsp.dev), or use --share dlna"
+    return f"run scripts/install.sh --share {share}, install fuse3, or use --share dlna"
+
+
+def multicast_bind_address(group: str) -> str:
+    """Where a socket joining a multicast group (SSDP) is bound. Linux: to the
+    group itself, so it gets only that multicast and never datagrams sent to
+    this host. Windows cannot bind a multicast address: to every interface."""
+    return "0.0.0.0" if WINDOWS else group  # noqa: S104  joins the group, see above
