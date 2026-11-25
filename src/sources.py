@@ -877,15 +877,20 @@ class BlurayDiscSource(DiscSource):
             play_alls = [t for t in titles if t.playlist in play_all_ids]
             candidates = [t for t in titles if t.playlist not in play_all_ids] or titles
 
-            # Deduplicate: keep only the first title (lowest playlist number) per opening
-            # clip. This removes alternate-audio/subtitle variants.
-            seen_sigs: set[str] = set()
-            unique: list[bluray.Title] = []
+            # Deduplicate: keep only one title per opening clip, removing
+            # alternate-audio/subtitle variants. On a 3D disc the 3D variant of an
+            # episode (#189), else the lowest playlist number, as today.
+            best_by_sig: dict[str, bluray.Title] = {}
+            sig_order: list[str] = []
             for t in candidates:
                 sig = sigs[t.playlist]
-                if sig not in seen_sigs:
-                    seen_sigs.add(sig)
-                    unique.append(t)
+                if sig not in best_by_sig:
+                    sig_order.append(sig)
+                    best_by_sig[sig] = t
+                elif info.has_3d and not _is_3d(items_by_playlist.get(best_by_sig[sig].playlist)) \
+                        and _is_3d(items_by_playlist.get(t.playlist)):
+                    best_by_sig[sig] = t
+            unique = [best_by_sig[sig] for sig in sig_order]
 
             if len(unique) >= 2:
                 by_dur = sorted(unique, key=lambda t: -t.duration)
