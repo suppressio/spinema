@@ -18,8 +18,11 @@ fi
 new=$(git -C "$REPO_DIR" describe --tags --always)
 
 pinned=$(sed -n 's/^EDGE264_COMMIT=//p' "$REPO_DIR/scripts/install.sh")
-if [ ! -x "$PREFIX/bin/edge264mvc_test" ] || [ "$(cat "$PREFIX/bin/edge264.commit" 2>/dev/null)" != "$pinned" ]; then
-    echo "edge264 or the installation itself needs setting up: running install.sh"
+# /srv/bd3d: an install from before the Disks/Spinema rename, whose Samba
+# share and mount point only install.sh knows how to migrate
+if [ ! -x "$PREFIX/bin/edge264mvc_test" ] || [ "$(cat "$PREFIX/bin/edge264.commit" 2>/dev/null)" != "$pinned" ] \
+        || [ -e /srv/bd3d ]; then
+    echo "edge264, the installation, or the Samba share's layout needs setting up: running install.sh"
     # keep the --share kind of the existing install (none recorded: install.sh's default)
     # (an install from before the rename, bluray3d-xr, still has it under its old prefix)
     share=

@@ -14,13 +14,14 @@
 #                   fuse3 samba
 #   - /opt/spinema                edge264 decoder + the program
 #   - /usr/local/bin/spinema      command to start it
-#   - /srv/bd3d                   mount point of the virtual files (--share samba/both)
+#   - /srv/spinema                plain folder; spinema creates and mounts Disks
+#                                 inside it itself (--share samba/both)
 #   - /etc/fuse.conf              enables user_allow_other (--share samba/both)
-#   - /etc/samba/smb.conf         adds the read-only guest share [Disks] (--share samba/both)
+#   - /etc/samba/smb.conf         adds the read-only guest share [Spinema] (--share samba/both)
 set -euo pipefail
 
 PREFIX=/opt/spinema
-MOUNT=/srv/bd3d
+BASE=/srv/spinema
 EDGE264_REPO=https://github.com/jens-duttke/edge264-mvc.git
 # edge264-mvc release v2026.10.19
 EDGE264_COMMIT=f181792e842ce4e99e2ef4a41bfd30c1c1514b42
@@ -134,25 +135,31 @@ step "4/5 FUSE mount point"
 if [ "$SHARE" = dlna ]; then
     echo "skipped (--share dlna: no FUSE mount needed)"
 else
-    sudo install -d -o "$ME" -g "$(id -gn)" "$MOUNT"
+    # the mount point used before the Disks/Spinema rename: spinema creates and
+    # mounts Disks inside $BASE itself, so this is left over once empty
+    if mountpoint -q /srv/bd3d; then
+        fusermount3 -u /srv/bd3d || sudo umount /srv/bd3d || true
+    fi
+    sudo rmdir /srv/bd3d 2>/dev/null || true
+    sudo install -d -o "$ME" -g "$(id -gn)" "$BASE"
     if ! grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null; then
         echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
     fi
-    echo "$MOUNT ready, user_allow_other enabled"
+    echo "$BASE ready, user_allow_other enabled"
 fi
 
-step "5/5 Samba share [Disks]"
+step "5/5 Samba share [Spinema]"
 if [ "$SHARE" = dlna ]; then
     echo "skipped (--share dlna: Samba not needed)"
 else
     if grep -qF "$MARK_BEGIN" /etc/samba/smb.conf; then
-        echo "share already configured"
-    else
-        sudo tee -a /etc/samba/smb.conf >/dev/null <<SHARE
+        sudo sed -i "/^${MARK_BEGIN}\$/,/^${MARK_END}\$/d" /etc/samba/smb.conf
+    fi
+    sudo tee -a /etc/samba/smb.conf >/dev/null <<SHARE
 
 $MARK_BEGIN
-[Disks]
-   path = $MOUNT
+[Spinema]
+   path = $BASE
    comment = Blu-ray and DVD, played on the fly
    read only = yes
    guest ok = yes
@@ -160,10 +167,9 @@ $MARK_BEGIN
    force user = $ME
 $MARK_END
 SHARE
-    fi
     testparm -s >/dev/null 2>&1 || { echo "smb.conf check failed: run 'testparm' to see why"; exit 1; }
     sudo systemctl restart smbd 2>/dev/null || sudo service smbd restart
-    echo "Samba share [Disks] active"
+    echo "Samba share [Spinema] active"
 fi
 
 # Firewall: only suggest, never open ports on our own
@@ -208,10 +214,10 @@ HINT
 fi
 case "$SHARE" in
     samba)
-        printf 'Then on the glasses open the network share \\\\%s\\Disks\n' "$(hostname -I | awk '{print $1}')" ;;
+        printf 'Then on the glasses open the network share \\\\%s\\Spinema\\Disks\n' "$(hostname -I | awk '{print $1}')" ;;
     dlna)
         printf 'Then on the glasses look for "spinema" among the DLNA/media servers it finds on the network\n' ;;
     both)
-        printf 'Then on the glasses open the network share \\\\%s\\Disks, or look for "spinema" among the DLNA/media servers it finds\n' "$(hostname -I | awk '{print $1}')" ;;
+        printf 'Then on the glasses open the network share \\\\%s\\Spinema\\Disks, or look for "spinema" among the DLNA/media servers it finds\n' "$(hostname -I | awk '{print $1}')" ;;
 esac
 echo "Stop it with Ctrl+C."

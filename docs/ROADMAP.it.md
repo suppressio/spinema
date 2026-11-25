@@ -14,8 +14,8 @@ verificato, passo per passo, su Tron: Legacy 3D.
 
 Cosa è fatto:
 
-- [x] **Blu-ray 2D** e **DVD**, ciascuno nella sua cartella della condivisione
-  `Disks`. Il demuxer `dvdvideo` di FFmpeg salta solo in modo approssimativo
+- [x] **Blu-ray 2D** e **DVD**, ciascuno nella sua cartella dentro `Disks`, nella
+  condivisione `Spinema`. Il demuxer `dvdvideo` di FFmpeg salta solo in modo approssimativo
   (secondi di scarto, senza sapere dove è atterrato), quindi i DVD hanno un
   lettore proprio: libdvdread + lettura degli IFO, seek con i pacchetti di navigazione
   (esatto).

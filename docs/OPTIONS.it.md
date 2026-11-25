@@ -25,7 +25,7 @@ Le impostazioni predefinite funzionano: questa pagina serve solo se vuoi cambiar
 | [Condivisione via Samba, DLNA, o entrambe](#dlnaupnp-invece-di-samba) | `SHARE` | `--share samba\|dlna\|both` | `samba` |
 | [Porta DLNA/HTTP](#dlnaupnp-invece-di-samba) | `HTTP_PORT` | `--http-port` | `8201` |
 | [Titoli episodi online](#ricerca-online-degli-episodi) | `LOOKUP=on\|off` | `--lookup` | spento |
-| Punto di montaggio | — | `--mount` | `/srv/bd3d` |
+| Punto di montaggio | — | `--mount` | `/srv/spinema/Disks` |
 | [File di log del programma](#log) | — | `--log percorso` o `none` | `~/.local/state/spinema/spinema.log` |
 | [Log della pipeline](#log) | — | `--log-file` | `/tmp/bd3d-pipeline.log` |
 | [Log dei salti](#log) | — | `--debug` | spento |
@@ -86,7 +86,7 @@ spinema --lookup /dev/sr0
 
 ## DLNA/UPnP invece di Samba
 
-Per default i file sono montati solo per Samba, la cartella `[Disks]` (`--share samba`). `--share dlna` annuncia gli stessi file via DLNA/UPnP invece che via SMB, per i player che esplorano un media server invece di aprire una cartella di rete (smart TV, Kodi, Moon VR…); in questa modalità non servono né FUSE né Samba. `--share both` fa entrambe le cose insieme, per esempio per servire una TV via DLNA e un telefono via SMB dallo stesso programma.
+Per default i file sono montati solo per Samba, la cartella `[Spinema]` (`--share samba`). `--share dlna` annuncia gli stessi file via DLNA/UPnP invece che via SMB, per i player che esplorano un media server invece di aprire una cartella di rete (smart TV, Kodi, Moon VR…); in questa modalità non servono né FUSE né Samba. `--share both` fa entrambe le cose insieme, per esempio per servire una TV via DLNA e un telefono via SMB dallo stesso programma.
 
 ```console
 spinema --share dlna --audio-lang ita,eng /dev/sr0

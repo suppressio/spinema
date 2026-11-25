@@ -34,7 +34,7 @@ Blu-ray 3D nel lettore (oppure un ISO / una cartella BDMV / un rip MKV)
    "ITA - film - 3D SBS.ts"  file virtuale in una cartella condivisa SMB (su disco non esiste)
         │   Wi-Fi
         ▼
-   Occhiali / visore: player ► cartella di rete ► Disks ► film   → 3D, pausa, seek
+   Occhiali / visore: player ► cartella di rete ► Spinema ► Disks ► film   → 3D, pausa, seek
 ```
 
 - **Inserisci il disco, compare il film.** Circa 15 secondi dopo la chiusura dello sportello il file compare nella cartella condivisa, con il nome del disco; togli il disco e sparisce.
@@ -104,7 +104,7 @@ Quando inserisci un disco compaiono i suoi file; ogni riga `pipeline from` è il
 11:23:59 spinema v1.0.0
 11:24:00 video encoder: nvenc
 11:24:00 watching /dev/sr0: insert a disc
-11:24:00 mounted on /srv/bd3d — Ctrl+C to unmount
+11:24:00 mounted on /srv/spinema/Disks — Ctrl+C to unmount
 11:24:00 /dev/sr0: disc inserted, opening it
 11:24:00 + Blu-ray 3D/ITA - Tron - Legacy 3D - 3D SBS.ts  (125 min, 24.0 Mbit/s, audio 0x1102 ita dts, forced subtitles ita)
 11:24:00 + Blu-ray 3D/ITAsubITA - Tron - Legacy 3D - 3D SBS.ts  (125 min, 24.0 Mbit/s, audio 0x1102 ita dts, subtitles ita)
@@ -119,7 +119,7 @@ Si ferma con `Ctrl+C`. Aggiornare e disinstallare: [più sotto](#aggiornare-e-di
 
 #### Script nativo (da una copia del progetto)
 
-Per una copia di lavoro del progetto, o per seguire la versione in sviluppo. [`scripts/install.sh`](scripts/install.sh), avviato come utente normale, installa i pacchetti, compila edge264, installa il comando e aggiunge a Samba la condivisione `[Disks]` in sola lettura e ad accesso ospite (Debian/Ubuntu):
+Per una copia di lavoro del progetto, o per seguire la versione in sviluppo. [`scripts/install.sh`](scripts/install.sh), avviato come utente normale, installa i pacchetti, compila edge264, installa il comando e aggiunge a Samba la condivisione `[Spinema]` in sola lettura e ad accesso ospite (Debian/Ubuntu):
 ```console
 git clone https://github.com/suppressio/spinema.git
 cd spinema
@@ -189,11 +189,13 @@ Se sul PC gira già Samba, il container non può prendere la porta 445. I player
 - strada nativa: `./scripts/update.sh` nella cartella del progetto. Scarica l'ultima versione e copia il programma in `/opt/spinema`; ripete tutto `install.sh` solo quando serve (è cambiato edge264, o non c'è nulla di installato). Alla fine scrive "Updated from vX to vY" e l'elenco delle modifiche. Se il programma è acceso, fermalo e riavvialo.
 - Docker: `git pull && docker compose up -d --build`.
 
+**La condivisione si è spostata su `\\PC\Spinema\Disks`** (era `\\PC\Disks`): punta lì il tuo player una volta aggiornato. `update.sh`, il `postinst` del `.deb` e l'immagine Docker spostano da soli la condivisione Samba e il punto di montaggio, eliminando il vecchio `/srv/bd3d`.
+
 **Se vieni da `bluray3d-xr`**: Spinema è il nuovo nome del progetto (comando, pacchetto e `/opt/bluray3d-xr` si chiamavano `bluray3d-xr`). Il nuovo `.deb` sostituisce il vecchio pacchetto e ne tiene il gruppo; per l'installazione nativa esegui `./scripts/update.sh` due volte (la prima è ancora lo script vecchio, che aggiorna sul posto; la seconda sposta l'installazione e la sua condivisione Samba); Docker ricostruisce l'immagine con il nome nuovo (prima `docker compose down` nella cartella vecchia se hai clonato di nuovo; `docker image rm bluray3d-xr:local` libera l'immagine vecchia). Ferma il programma prima di aggiornare. Poi avvia il nuovo comando `spinema`. Con il `.deb`, se più avanti elimini del tutto il vecchio pacchetto (`sudo apt purge bluray3d-xr`, resta elencato come `rc`), esegui poi `sudo dpkg-reconfigure spinema`: il purge del vecchio pacchetto toglie `/srv/bd3d`. I vecchi log restano in `~/.local/state/bluray3d-xr/`. Due cose da sapere: script, unit o alias che chiamano `bluray3d-xr` vanno cambiati in `spinema`, e i player DLNA lo mostrano come un server nuovo (la voce vecchia è morta).
 
 **Disinstallare**:
-- pacchetto della release: `sudo apt remove spinema` rimuove la condivisione e `/srv/bd3d`; `sudo apt purge spinema` rimuove anche il gruppo `spinema`. La riga `user_allow_other` resta in `/etc/fuse.conf`.
-- strada nativa: `./scripts/uninstall.sh`. Smonta e cancella `/srv/bd3d`, toglie la condivisione `[Disks]` da `smb.conf` (solo il blocco che aveva aggiunto: le tue condivisioni restano), `/opt/spinema` e il comando `spinema`. Restano i pacchetti apt (FFmpeg, Samba, libbluray...) e la riga `user_allow_other` in `/etc/fuse.conf`, perché possono servire ad altro: se non servono, toglili con apt.
+- pacchetto della release: `sudo apt remove spinema` rimuove la condivisione e `/srv/spinema`; `sudo apt purge spinema` rimuove anche il gruppo `spinema`. La riga `user_allow_other` resta in `/etc/fuse.conf`.
+- strada nativa: `./scripts/uninstall.sh`. Smonta e cancella `/srv/spinema/Disks` insieme a `/srv/spinema`, toglie la condivisione `[Spinema]` da `smb.conf` (solo il blocco che aveva aggiunto: le tue condivisioni restano), `/opt/spinema` e il comando `spinema`. Restano i pacchetti apt (FFmpeg, Samba, libbluray...) e la riga `user_allow_other` in `/etc/fuse.conf`, perché possono servire ad altro: se non servono, toglili con apt.
 - Docker: `docker compose down --rmi all` ferma il container e cancella la sua immagine.
 
 Poi cancella la cartella del progetto.
@@ -203,7 +205,7 @@ Poi cancella la cartella del progetto.
 ## Passo 2 — Guardarlo sugli occhiali
 
 - [ ] Inserisci il disco nel PC e aspetta circa 15 secondi.
-- [ ] Sugli occhiali, sul visore o sulla TV apri la cartella di rete del PC: molti player la trovano da soli sotto "rete locale", altrimenti aggiungi il suo indirizzo IP (sul PC lo trovi con `hostname -I`), accesso ospite / anonimo.
+- [ ] Sugli occhiali, sul visore o sulla TV apri la cartella di rete del PC, **Spinema**: molti player la trovano da soli sotto "rete locale", altrimenti aggiungi il suo indirizzo IP (sul PC lo trovi con `hostname -I`), accesso ospite / anonimo.
 - [ ] Apri la cartella **Disks** (se sembra vuota, torna indietro e rientra). I dischi 3D sono in `Blu-ray 3D/` come `ITA - <film> - 3D SBS.ts`, quelli normali in `Blu-ray/` come `ITA - <film>.ts`: un file per ogni lingua audio, più le versioni con i sottotitoli (`ITAsubENG - ...`: audio italiano, sottotitoli inglesi). In `Light/` ci sono gli stessi film a un bitrate più basso, per il Wi-Fi debole; con `--heavy` (`HEAVY=on`), in `Heavy/` ci sono quelli 2D e 3D (non i DVD) a un bitrate più alto, per una rete cablata (non ancora verificato su dischi reali, vedi [Rete e qualità](docs/OPTIONS.it.md#rete-e-qualità)).
 
 ```

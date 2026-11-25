@@ -25,7 +25,7 @@ The defaults work: you only need this page to change what the share offers (lang
 | [Share over Samba, DLNA, or both](#dlnaupnp-instead-of-samba) | `SHARE` | `--share samba\|dlna\|both` | `samba` |
 | [DLNA/HTTP port](#dlnaupnp-instead-of-samba) | `HTTP_PORT` | `--http-port` | `8201` |
 | [Online episode titles](#online-episode-lookup) | `LOOKUP=on\|off` | `--lookup` | off |
-| Mount point | — | `--mount` | `/srv/bd3d` |
+| Mount point | — | `--mount` | `/srv/spinema/Disks` |
 | [Program log file](#logs) | — | `--log path` or `none` | `~/.local/state/spinema/spinema.log` |
 | [Pipeline log](#logs) | — | `--log-file` | `/tmp/bd3d-pipeline.log` |
 | [Jump log](#logs) | — | `--debug` | off |
@@ -86,7 +86,7 @@ spinema --lookup /dev/sr0
 
 ## DLNA/UPnP instead of Samba
 
-By default the files are only mounted for Samba, the `[Disks]` share (`--share samba`). `--share dlna` announces the same files over DLNA/UPnP instead, for players that browse a media server rather than opening a network share (smart TVs, Kodi, Moon VR...); neither FUSE nor Samba is needed in this mode. `--share both` does both at once, e.g. to serve a TV over DLNA and a phone over SMB from the same program.
+By default the files are only mounted for Samba, the `[Spinema]` share (`--share samba`). `--share dlna` announces the same files over DLNA/UPnP instead, for players that browse a media server rather than opening a network share (smart TVs, Kodi, Moon VR...); neither FUSE nor Samba is needed in this mode. `--share both` does both at once, e.g. to serve a TV over DLNA and a phone over SMB from the same program.
 
 ```console
 spinema --share dlna --audio-lang ita,eng /dev/sr0
