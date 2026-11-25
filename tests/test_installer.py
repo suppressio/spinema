@@ -1,4 +1,5 @@
 """Focused checks for the native and Docker dependency decisions."""
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -67,15 +68,24 @@ def test_installer_drops_the_old_mount_point_for_every_share_kind() -> None:
 
 
 def test_updater_migrates_only_while_the_share_is_on_the_old_mount_point(tmp_path: Path) -> None:
-    # update.sh re-runs install.sh while smb.conf still shares /srv/bd3d; a folder
-    # left behind (not empty) must not re-run it on every update (#196)
+    # update.sh re-runs install.sh while our smb.conf block still shares /srv/bd3d;
+    # a folder left behind, or someone else's share on it, must not re-run it on
+    # every update (#196)
     update = (ROOT / "scripts/update.sh").read_text(encoding="utf-8")
     assert "[ -e /srv/bd3d ]" not in update
-    pattern = update.split("grep -qsE '", 1)[1].split("'", 1)[0]
-    old = "[Disks]\n   path = /srv/bd3d\n   read only = yes\n"
-    new = "[Spinema]\n   path = /srv/spinema\n   read only = yes\n"
-    for conf, migrate in ((old, True), (new, False)):
+    assert '[ "$share" != dlna ] && old_share_layout' in update
+    # no CR: a Windows checkout may use CRLF, which bash would keep in the patterns
+    function = _case_body(update.replace("\r", ""), "old_share_layout() {", "\n}")
+    # by full path: a bare "bash" can be WSL's on Windows (see test_deb_version)
+    bash = shutil.which("bash") or "bash"
+    ours = "# >>> spinema >>>\n[{}]\n   path = {}\n   read only = yes\n# <<< spinema <<<\n"
+    cases = ((ours.format("Disks", "/srv/bd3d"), True),
+             (ours.format("Spinema", "/srv/spinema"), False),
+             ("[mine]\n   path = /srv/bd3d\n" + ours.format("Spinema", "/srv/spinema"), False))
+    for conf, migrate in cases:
         smb = tmp_path / "smb.conf"
-        smb.write_text(conf, encoding="utf-8")
-        found = subprocess.run(["grep", "-qsE", pattern, str(smb)], check=False).returncode == 0
-        assert found is migrate
+        smb.write_bytes(conf.encode())     # LF line ends on every platform
+        script = f'old_share_layout() {{{function}\n}}\nold_share_layout "$1"'
+        found = subprocess.run([bash, "-c", script, "test", smb.as_posix()],
+                               check=False).returncode == 0
+        assert found is migrate, conf

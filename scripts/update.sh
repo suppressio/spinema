@@ -18,19 +18,26 @@ fi
 new=$(git -C "$REPO_DIR" describe --tags --always)
 
 pinned=$(sed -n 's/^EDGE264_COMMIT=//p' "$REPO_DIR/scripts/install.sh")
-# a Samba share still on /srv/bd3d: an install from before the Disks/Spinema
-# rename, whose share and mount point only install.sh knows how to migrate.
-# smb.conf, not the folder: install.sh always fixes the share, while the folder
-# may survive it (not empty) and would then re-run install.sh on every update
+# keep the --share kind of the existing install (none recorded: install.sh's default)
+# (an install from before the rename, bluray3d-xr, still has it under its old prefix)
+share=
+for file in "$PREFIX/app/share" /opt/bluray3d-xr/app/share; do
+    if [ -s "$file" ]; then share=$(head -n 1 "$file"); break; fi
+done
+
+# the [spinema] block of smb.conf ($1) still shares /srv/bd3d: an install from
+# before the Disks/Spinema rename, whose share only install.sh knows how to migrate.
+# smb.conf, not the folder, which may survive install.sh (not empty); only our
+# own block, which install.sh rewrites, so a match cannot re-run it on every update
+old_share_layout() {
+    sed -n '/^# >>> spinema >>>$/,/^# <<< spinema <<<$/p' "$1" 2>/dev/null \
+        | grep -E '^[[:space:]]*path[[:space:]]*=[[:space:]]*/srv/bd3d[[:space:]]*$' >/dev/null
+}
+
+# --share dlna: install.sh leaves Samba alone, so it could not migrate the share
 if [ ! -x "$PREFIX/bin/edge264mvc_test" ] || [ "$(cat "$PREFIX/bin/edge264.commit" 2>/dev/null)" != "$pinned" ] \
-        || grep -qsE '^[[:space:]]*path[[:space:]]*=[[:space:]]*/srv/bd3d[[:space:]]*$' /etc/samba/smb.conf; then
+        || { [ "$share" != dlna ] && old_share_layout /etc/samba/smb.conf; }; then
     echo "edge264, the installation, or the Samba share's layout needs setting up: running install.sh"
-    # keep the --share kind of the existing install (none recorded: install.sh's default)
-    # (an install from before the rename, bluray3d-xr, still has it under its old prefix)
-    share=
-    for file in "$PREFIX/app/share" /opt/bluray3d-xr/app/share; do
-        if [ -s "$file" ]; then share=$(head -n 1 "$file"); break; fi
-    done
     exec "$REPO_DIR/scripts/install.sh" ${share:+--share "$share"}
 fi
 
