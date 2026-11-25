@@ -11,8 +11,17 @@ REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
 [ "$(id -u)" -ne 0 ] || { echo "Run as your normal user, not as root."; exit 1; }
 
 old=$(cat "$PREFIX/app/version" 2>/dev/null || true)
+self="$REPO_DIR/scripts/update.sh"
+before=$(cksum < "$self")
 if git -C "$REPO_DIR" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
     git -C "$REPO_DIR" pull --ff-only
+fi
+# bash goes on reading the update.sh it started with, even once the pull has
+# replaced the file: run the new one, or what it adds (a migration, #196) would
+# wait for the next update. Once only: the second run pulls nothing new
+if [ -z "${SPINEMA_UPDATE_RERUN:-}" ] && [ "$(cksum < "$self")" != "$before" ]; then
+    echo "update.sh itself changed: running the new one"
+    SPINEMA_UPDATE_RERUN=1 exec bash "$self" "$@"
 fi
 # the release (git tag) of the checkout, e.g. v1.1.0, or v1.1.0-2-gabc1234 two commits later
 new=$(git -C "$REPO_DIR" describe --tags --always)

@@ -1,7 +1,11 @@
 """Focused checks for the native and Docker dependency decisions."""
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parents[1]
 INSTALL = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
@@ -89,3 +93,33 @@ def test_updater_migrates_only_while_the_share_is_on_the_old_mount_point(tmp_pat
         found = subprocess.run([bash, "-c", script, "test", smb.as_posix()],
                                check=False).returncode == 0
         assert found is migrate, conf
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0,
+                    reason="the native install is Linux only, and update.sh refuses root")
+def test_updater_runs_the_new_update_sh_after_a_pull_that_changed_it(tmp_path: Path) -> None:
+    # bash keeps reading the update.sh it started with, even after `git pull`
+    # replaced the file: a migration added to update.sh (like #196's) would only
+    # run on the next update. The old script must hand over to the new one.
+    def git(cwd: Path, *args: str) -> None:
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                       cwd=cwd, check=True, capture_output=True)
+
+    origin, work, user = tmp_path / "origin.git", tmp_path / "work", tmp_path / "user"
+    git(tmp_path, "init", "-q", "--bare", str(origin))
+    git(tmp_path, "clone", "-q", str(origin), str(work))
+    (work / "scripts").mkdir()
+    (work / "scripts" / "update.sh").write_bytes((ROOT / "scripts/update.sh").read_bytes())
+    git(work, "add", "-A")
+    git(work, "commit", "-q", "-m", "current")
+    git(work, "push", "-q", "origin", "HEAD")
+    git(tmp_path, "clone", "-q", str(origin), str(user))
+    (work / "scripts" / "update.sh").write_bytes(
+        b'#!/usr/bin/env bash\necho "new update.sh ran (rerun=$SPINEMA_UPDATE_RERUN)"\n')
+    git(work, "commit", "-q", "-am", "update.sh changed")
+    git(work, "push", "-q", "origin", "HEAD")
+
+    result = subprocess.run(["bash", str(user / "scripts" / "update.sh")],
+                            capture_output=True, text=True, check=False, timeout=60)
+    assert "new update.sh ran (rerun=1)" in result.stdout, result.stdout + result.stderr
