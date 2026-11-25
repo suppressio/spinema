@@ -25,7 +25,7 @@ The defaults work: you only need this page to change what the share offers (lang
 | [Share over Samba, DLNA, or both](#dlnaupnp-instead-of-samba) | `SHARE` | `--share samba\|dlna\|both` | `samba` |
 | [DLNA/HTTP port](#dlnaupnp-instead-of-samba) | `HTTP_PORT` | `--http-port` | `8201` |
 | [Online episode titles](#online-episode-lookup) | `LOOKUP=on\|off` | `--lookup` | off |
-| Mount point | — | `--mount` | `/srv/spinema/Disks` |
+| Mount point | — | `--mount` | `/srv/spinema/Disks`; Windows: `C:\Program Files\Spinema\share\Disks` |
 | [Program log file](#logs) | — | `--log path` or `none` | `~/.local/state/spinema/spinema.log` |
 | [Pipeline log](#logs) | — | `--log-file` | `/tmp/bd3d-pipeline.log` |
 | [Jump log](#logs) | — | `--debug` | off |

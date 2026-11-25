@@ -13,17 +13,17 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
-if sys.platform != "linux":
-    # fuse_fs.py raises ImportError without libfuse3; the macOS (SPN#100) and
-    # Windows (SPN#106) backends for mfusepy aren't wired in yet, so there is
-    # nothing to test there
-    pytest.skip("fuse_fs.py needs libfuse3, Linux only until SPN#100 (macOS) "
-                "and SPN#106 (Windows)", allow_module_level=True)
-
-import fuse_fs
+if sys.platform == "darwin":
+    pytest.skip("FUSE on macOS is SPN#100", allow_module_level=True)
+try:
+    import fuse_fs
+except (ImportError, OSError) as e:      # no libfuse3, or no WinFsp (mfusepy: OSError)
+    pytest.skip(f"no FUSE here: {e}", allow_module_level=True)
+import osplatform
 from fuse_fs import Bd3dFS
 from library import SidecarFile
 from test_library import DiscSource, make_library, movies
@@ -198,11 +198,11 @@ def test_init_sets_up_libfuse(monkeypatch: pytest.MonkeyPatch) -> None:
         fuse_exit=fuse_exit,
     )
     monkeypatch.setattr(fuse_fs, "_libfuse", fake)
-    config = SimpleNamespace(use_ino=0, entry_timeout=1.0, attr_timeout=1.0)
     assert not fs.end_loop()                    # not mounted yet
-    fs.init_with_config(None, config)
+    # mfusepy calls it on FUSE 2 too (WinFsp), with no config: the options
+    # are given to mfusepy.FUSE() instead, the same on every platform
+    fs.init_with_config(None, None)
     assert fs.mounted.is_set()
-    assert (config.use_ino, config.entry_timeout, config.attr_timeout) == (1, 5, 5)
     assert fs.end_loop() and exited == [1234]
     fs.destroy("/")
     assert not fs.end_loop() and exited == [1234]    # never after libfuse freed it
@@ -240,6 +240,49 @@ def test_an_open_file_keeps_its_own_attributes(tmp_path: Path) -> None:
     assert errno_of(lambda: fs.getattr("/Blu-ray/Movie.ts", f)) == errno.ENOENT
     assert fs.getattr("/Blu-ray/Movie.ts")["st_ino"] == new.inode     # by path: the new one
     assert errno_of(lambda: fs.getattr(None)) == errno.ENOENT
+
+
+def test_mount_options_are_the_same_everywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    # tree ids as inode numbers, short caches (discs come and go), files owned
+    # by the user who mounts: as mount options, which libfuse3 and WinFsp
+    # both read (WinFsp drops entry_timeout and use_ino)
+    fuse = Mock()
+    monkeypatch.setattr(fuse_fs.mfusepy, "FUSE", fuse)
+    fuse_fs._Mount(Bd3dFS(Tree()), "/mnt")._run()
+    options = fuse.call_args.kwargs
+    assert (options["attr_timeout"], options["entry_timeout"], options["use_ino"]) == (5, 5, True)
+    assert (options["uid"], options["gid"]) == osplatform.fuse_owner()
+    assert options["ro"] and options["raw_fi"]
+
+
+def test_attributes_leave_the_owner_to_the_mount_options() -> None:
+    # os.getuid() does not exist on Windows: the owner is a mount option
+    fs = Bd3dFS(Tree())
+    assert not {"st_uid", "st_gid"} & fs.getattr("/").keys()
+
+
+def test_mount_waits_for_the_mount_point(monkeypatch: pytest.MonkeyPatch,
+                                         tmp_path: Path) -> None:
+    # WinFsp calls init before its folder is there: mount() must not return
+    # (and the program say "mounted") while a reader would find nothing
+    mount = tmp_path / "Disks"
+    release = threading.Event()
+
+    def fake_fuse(fs: Bd3dFS, mount_point: str, **_: object) -> None:
+        fs.init_with_config(None, None)
+        time.sleep(0.3)
+        Path(mount_point).mkdir()
+        release.wait(10)
+
+    monkeypatch.setattr(fuse_fs, "_libfuse", SimpleNamespace(
+        fuse_get_context=lambda: SimpleNamespace(contents=SimpleNamespace(fuse=1))))
+    monkeypatch.setattr(fuse_fs.mfusepy, "FUSE", fake_fuse)
+    monkeypatch.setattr(fuse_fs, "_mounted", None)
+    try:
+        fuse_fs.mount(Tree(), str(mount))
+        assert mount.is_dir()
+    finally:
+        release.set()
 
 
 def test_serve_fails_when_libfuse_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,6 +358,8 @@ def test_a_real_mount(tmp_path: Path) -> None:
         assert server.stdout.readline().strip() == "mounted"
         assert sorted(os.listdir(mount)) == ["a", "b"]
         assert (mount / "a").stat().st_size == 4096
+        if sys.platform != "win32":
+            assert (mount / "a").stat().st_uid == os.getuid()   # the uid= mount option
         # two readers at once are served at once, not one after the other
         readers = [subprocess.Popen([sys.executable, "-c", READER, str(mount / n)],
                                     stdout=subprocess.PIPE, text=True) for n in ("a", "b")]

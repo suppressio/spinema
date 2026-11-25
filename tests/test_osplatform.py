@@ -4,9 +4,11 @@ interface. The Windows branches are exercised here regardless of the host OS,
 by flipping the WINDOWS flag and replacing kernel32 with a fake, the same
 trick used below for fcntl on Linux."""
 import ctypes
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -310,3 +312,116 @@ def test_default_program_log_on_windows_falls_back_to_appdata_local(
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     assert default_program_log() == Path.home() / "AppData" / "Local" / "spinema" \
         / "spinema.log"
+
+
+def test_default_mount_point_on_linux_is_inside_the_installed_share(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # the .deb and install.sh create /srv/spinema: spinema mounts Disks inside it (#196)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
+    assert osplatform.default_mount_point() == "/srv/spinema/Disks"
+
+
+def test_default_mount_point_on_windows_is_below_the_shared_folder(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # the installer shares <install dir>\share as "Spinema" and lets the user
+    # write there: the mount folder goes below it, never shared itself (#102)
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
+    assert osplatform.default_mount_point() == str(tmp_path / "Spinema" / "share" / "Disks")
+
+
+def test_default_mount_point_on_windows_without_programfiles(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.delenv("PROGRAMFILES", raising=False)
+    assert osplatform.default_mount_point() == str(
+        Path("C:\\Program Files") / "Spinema" / "share" / "Disks")
+
+
+def test_fuse_creates_the_mount_point_only_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    # WinFsp makes the mount folder itself (a junction) and deletes it on
+    # unmount; libfuse mounts on a folder that exists already
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    assert osplatform.fuse_creates_mount_point()
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
+    assert not osplatform.fuse_creates_mount_point()
+
+
+def test_fuse_library_on_linux_is_libfuse3(monkeypatch: pytest.MonkeyPatch) -> None:
+    # mfusepy prefers libfuse 2 when both are installed: libfuse3 is named
+    def find(name: str) -> str:
+        return "libfuse3.so.4" if name == "fuse3" else "libfuse.so.2"
+
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
+    monkeypatch.setattr(osplatform.ctypes.util, "find_library", find)
+    assert osplatform.fuse_library() == "libfuse3.so.4"
+
+
+def test_fuse_library_missing_on_linux_is_an_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
+    monkeypatch.setattr(osplatform.ctypes.util, "find_library", Mock(return_value=None))
+    with pytest.raises(ImportError, match="libfuse3 not found"):
+        osplatform.fuse_library()
+
+
+def test_fuse_library_on_windows_is_left_to_mfusepy(monkeypatch: pytest.MonkeyPatch) -> None:
+    # mfusepy finds WinFsp's DLL itself, from the registry
+    find = Mock()
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setattr(osplatform.ctypes.util, "find_library", find)
+    assert osplatform.fuse_library() is None
+    find.assert_not_called()
+
+
+def test_fuse_owner_on_windows_is_the_mounting_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    # WinFsp: -1 is the user who mounts (any other uid maps to some SID, 0 to
+    # S-1-5-0 and -1 in getattr to "nobody", checked on Windows 11)
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    assert osplatform.fuse_owner() == (-1, -1)
+
+
+def test_fuse_owner_on_linux_is_this_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    if sys.platform == "win32":    # in the body: pyright narrows on it, not on skipif
+        pytest.skip("os.getuid is POSIX only")
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
+    assert osplatform.fuse_owner() == (os.getuid(), os.getgid())
+
+
+def test_force_unmount_on_linux_is_a_lazy_fusermount3(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = Mock()
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
+    monkeypatch.setattr(osplatform.subprocess, "run", run)
+    osplatform.force_unmount("/srv/spinema/Disks")
+    run.assert_called_once_with(["fusermount3", "-u", "-z", "/srv/spinema/Disks"], check=False)
+
+
+def test_force_unmount_on_windows_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # WinFsp has no fusermount3: its volume goes when the process ends
+    run = Mock()
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setattr(osplatform.subprocess, "run", run)
+    osplatform.force_unmount("C:\\Program Files\\Spinema\\share\\Disks")
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(("windows", "expected", "unexpected"), [
+    (True, "install WinFsp", "fuse3"),
+    (False, "install fuse3", "WinFsp"),
+])
+def test_fuse_install_hint(monkeypatch: pytest.MonkeyPatch, windows: bool,
+                           expected: str, unexpected: str) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", windows)
+    hint = osplatform.fuse_install_hint("samba")
+    assert expected in hint and unexpected not in hint
+    assert hint.endswith("or use --share dlna")
+    assert ("scripts/install.sh --share samba" in hint) is not windows
+
+
+@pytest.mark.parametrize(("windows", "expected"), [(False, "239.255.255.250"),
+                                                   (True, "0.0.0.0")])  # noqa: S104
+def test_multicast_bind_address(monkeypatch: pytest.MonkeyPatch, windows: bool,
+                                expected: str) -> None:
+    # Linux: bound to the group, the socket gets only multicast. Windows cannot
+    # bind a multicast address (WinError 10049, checked on Windows 11)
+    monkeypatch.setattr(osplatform, "WINDOWS", windows)
+    assert osplatform.multicast_bind_address("239.255.255.250") == expected

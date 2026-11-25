@@ -1,6 +1,11 @@
 """ssdp.py: the message building/parsing SsdpResponder sends over its
 multicast socket, tested on their own (no socket: see docs/DEVELOPMENT.md on
-what needs real hardware/network, out of scope for unit tests)."""
+what needs real hardware/network, out of scope for unit tests), and where its
+socket is bound."""
+from unittest.mock import Mock
+
+import pytest
+
 import ssdp
 
 
@@ -63,3 +68,16 @@ def test_search_targets_covers_the_device_and_its_services() -> None:
     assert root_usn == "uuid:abc::upnp:rootdevice"
     uuid_usn = next(usn for st, usn in targets if st == "uuid:abc")
     assert uuid_usn == "uuid:abc"
+
+
+def test_the_socket_is_bound_where_the_platform_allows(monkeypatch: pytest.MonkeyPatch) -> None:
+    bound: list[tuple[str, int]] = []
+    sock = Mock()
+    sock.bind.side_effect = bound.append
+    monkeypatch.setattr(ssdp.socket, "socket", Mock(return_value=sock))
+    monkeypatch.setattr(ssdp.osplatform, "multicast_bind_address", "bind:{}".format)
+    r = ssdp.SsdpResponder("http://x/description.xml", "u", "urn:d", [], "test")
+    monkeypatch.setattr(r, "_notify", Mock())
+    monkeypatch.setattr(ssdp.threading, "Thread", Mock())
+    r.start()
+    assert bound == [(f"bind:{ssdp.MULTICAST_ADDR}", ssdp.PORT)]

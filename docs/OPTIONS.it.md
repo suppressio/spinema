@@ -25,7 +25,7 @@ Le impostazioni predefinite funzionano: questa pagina serve solo se vuoi cambiar
 | [Condivisione via Samba, DLNA, o entrambe](#dlnaupnp-invece-di-samba) | `SHARE` | `--share samba\|dlna\|both` | `samba` |
 | [Porta DLNA/HTTP](#dlnaupnp-invece-di-samba) | `HTTP_PORT` | `--http-port` | `8201` |
 | [Titoli episodi online](#ricerca-online-degli-episodi) | `LOOKUP=on\|off` | `--lookup` | spento |
-| Punto di montaggio | — | `--mount` | `/srv/spinema/Disks` |
+| Punto di montaggio | — | `--mount` | `/srv/spinema/Disks`; Windows: `C:\Program Files\Spinema\share\Disks` |
 | [File di log del programma](#log) | — | `--log percorso` o `none` | `~/.local/state/spinema/spinema.log` |
 | [Log della pipeline](#log) | — | `--log-file` | `/tmp/bd3d-pipeline.log` |
 | [Log dei salti](#log) | — | `--debug` | spento |
