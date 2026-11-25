@@ -123,3 +123,22 @@ def test_updater_runs_the_new_update_sh_after_a_pull_that_changed_it(tmp_path: P
     result = subprocess.run(["bash", str(user / "scripts" / "update.sh")],
                             capture_output=True, text=True, check=False, timeout=60)
     assert "new update.sh ran (rerun=1)" in result.stdout, result.stdout + result.stderr
+
+
+def test_every_build_uses_the_edge264_commit_pinned_in_install_sh() -> None:
+    # one decoder version for the native install, the .deb and Windows (#105)
+    pinned = INSTALL.split("EDGE264_COMMIT=", 1)[1].split("\n", 1)[0].strip()
+    deb = (ROOT / "scripts/build-deb.sh").read_text(encoding="utf-8")
+    assert f"edge264_commit={pinned}" in deb
+    windows = (ROOT / "scripts/build-edge264-windows.sh").read_text(encoding="utf-8")
+    assert "EDGE264_COMMIT" in windows and "scripts/install.sh" in windows
+    assert pinned not in windows        # read from install.sh, not a third copy
+
+
+def test_windows_edge264_build_is_portable_and_self_contained() -> None:
+    windows = (ROOT / "scripts/build-edge264-windows.sh").read_text(encoding="utf-8")
+    assert "OS=windows" in windows
+    assert "-posix" in windows          # MinGW with POSIX threads: edge264 uses pthreads
+    assert "CFLAGS=-march=x86-64 VARIANTS=x86-64-v2,x86-64-v3,logs" in windows  # as the .deb
+    for name in ("edge264mvc.2.dll", "edge264mvc_test.exe", "edge264.commit", "LICENSE_BSD.txt"):
+        assert name in windows

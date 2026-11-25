@@ -213,6 +213,19 @@ dd if="$f" bs=188 skip=5000000 count=20000 status=none > /tmp/piece.ts
 ffprobe -hide_banner /tmp/piece.ts
 ```
 
+## Windows: the edge264 decoder
+
+The Windows port (#10) decodes 3D with the same edge264-mvc as Linux, cross-compiled from Linux at the commit `scripts/install.sh` pins:
+
+```bash
+sudo apt install gcc-mingw-w64-x86-64-posix make git
+scripts/build-edge264-windows.sh            # dist/windows/: edge264mvc_test.exe, edge264mvc.2.dll, LICENSE_BSD.txt, edge264.commit
+```
+
+The two files go side by side and need nothing else: MinGW's runtime and winpthreads are linked in statically, they only import `KERNEL32.dll` and `msvcrt.dll`. edge264's BSD licence (`LICENSE_BSD.txt`) must ship with them. The build is portable like the `.deb`'s (baseline x86-64, faster variants picked at run time).
+
+To check a build, decode the same input on Linux and on Windows and compare the frames: `edge264mvc_test - -O < input.264` on both, then an MD5 per Y4M frame. The input is what `disc_reader.py` writes for a 3D title (see *Taking a pipeline apart*). Checked for #105 on a Windows 11 VM with 2 cores: every frame identical to Linux (1243 frames of a 3D Blu-ray), about 4.3× real time (Linux on 2 cores of the host: about 6×).
+
 ---
 
 ## Releases
