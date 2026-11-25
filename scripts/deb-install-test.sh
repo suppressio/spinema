@@ -19,6 +19,8 @@ installed() { [ "$(dpkg-query -W -f '${db:Status-Status}' "$1" 2>/dev/null)" = i
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+# an install from before the Disks/Spinema rename (#196) left this mount point
+mkdir -p /srv/bd3d
 case "$mode" in
     recommends) apt-get install -y "$deb" ;;
     no-recommends) apt-get install -y --no-install-recommends "$deb" ;;
@@ -32,11 +34,37 @@ done
 grep -q '^# Permission to use, copy, modify, and distribute this software' "$app/mfusepy.py"
 
 spinema --version
+test ! -e /srv/bd3d
 # the DLNA path imports no FUSE module
 python3 -c "import sys; sys.path.insert(0, '$app'); import bd3d_fs"
 
+# the Samba block of the release before #196: postinst must replace it, every time
+old_share() {
+    sed -i '/^# >>> spinema >>>$/,/^# <<< spinema <<<$/d' /etc/samba/smb.conf
+    cat >> /etc/samba/smb.conf <<'OLD'
+
+# >>> spinema >>>
+[Disks]
+   path = /srv/bd3d
+   comment = Blu-ray and DVD, played on the fly
+   read only = yes
+   guest ok = yes
+   browseable = yes
+# <<< spinema <<<
+OLD
+    mkdir -p /srv/bd3d
+}
+
 if [ "$mode" = recommends ]; then
     testparm -s | grep -q '^\[Spinema\]$'
+    old_share
+    dpkg-reconfigure spinema
+    dpkg-reconfigure spinema
+    test ! -e /srv/bd3d
+    testparm -s | grep -q '^\[Spinema\]$'
+    if testparm -s | grep -q '^\[Disks\]$'; then echo "old [Disks] share left" >&2; exit 1; fi
+    [ "$(grep -cxF '# >>> spinema >>>' /etc/samba/smb.conf)" = 1 ]
+    testparm -s --section-name Spinema --parameter-name path | grep -qx /srv/spinema
     grep -qxF user_allow_other /etc/fuse.conf
     # loads libfuse3 through mfusepy and builds the adapter, without mounting
     python3 - "$app" <<'PY'

@@ -17,8 +17,12 @@ if ! getent group "$group" >/dev/null; then
 fi
 install -d -o root -g "$group" -m 2775 "$base"
 # the mount point used before the Disks/Spinema rename: spinema creates and
-# mounts Disks inside $base itself, so this is left over once empty
-rmdir /srv/bd3d 2>/dev/null || true
+# mounts Disks inside $base itself, so this is left over. Lazy unmount first:
+# `mountpoint` says no to a FUSE mount left by a crash, which rmdir cannot remove
+umount -l /srv/bd3d 2>/dev/null || true
+if ! rmdir /srv/bd3d 2>/dev/null && [ -e /srv/bd3d ]; then
+    echo "spinema: /srv/bd3d is no longer used but could not be removed (not empty?)" >&2
+fi
 
 # FUSE and Samba are only recommended: --share dlna needs neither. Configure
 # them when installed; installing Samba later runs this again ("triggered",

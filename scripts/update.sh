@@ -18,10 +18,12 @@ fi
 new=$(git -C "$REPO_DIR" describe --tags --always)
 
 pinned=$(sed -n 's/^EDGE264_COMMIT=//p' "$REPO_DIR/scripts/install.sh")
-# /srv/bd3d: an install from before the Disks/Spinema rename, whose Samba
-# share and mount point only install.sh knows how to migrate
+# a Samba share still on /srv/bd3d: an install from before the Disks/Spinema
+# rename, whose share and mount point only install.sh knows how to migrate.
+# smb.conf, not the folder: install.sh always fixes the share, while the folder
+# may survive it (not empty) and would then re-run install.sh on every update
 if [ ! -x "$PREFIX/bin/edge264mvc_test" ] || [ "$(cat "$PREFIX/bin/edge264.commit" 2>/dev/null)" != "$pinned" ] \
-        || [ -e /srv/bd3d ]; then
+        || grep -qsE '^[[:space:]]*path[[:space:]]*=[[:space:]]*/srv/bd3d[[:space:]]*$' /etc/samba/smb.conf; then
     echo "edge264, the installation, or the Samba share's layout needs setting up: running install.sh"
     # keep the --share kind of the existing install (none recorded: install.sh's default)
     # (an install from before the rename, bluray3d-xr, still has it under its old prefix)

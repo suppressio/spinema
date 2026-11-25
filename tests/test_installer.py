@@ -1,4 +1,5 @@
 """Focused checks for the native and Docker dependency decisions."""
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -54,3 +55,27 @@ def test_dlna_compose_overlay_passes_the_drive_named_by_drive() -> None:
     dlna = (ROOT / "docker-compose.dlna.yml").read_text(encoding="utf-8")
     assert '"${DRIVE:-/dev/null}"' in dlna      # the drive reaches a DLNA-only container
     assert "devices: !reset" not in dlna        # which would drop it
+
+
+def test_installer_drops_the_old_mount_point_for_every_share_kind() -> None:
+    # /srv/bd3d (before #196) must go even with --share dlna, which skips the rest of step 4
+    step4 = _case_body(INSTALL, 'step "4/5 FUSE mount point"\n', 'if [ "$SHARE" = dlna ]')
+    assert step4.strip() == "drop_old_mount"
+    drop = _case_body(INSTALL, "drop_old_mount() {", "\n}")
+    assert "mountpoint" not in drop     # says no to a stale FUSE mount, which rmdir cannot remove
+    assert "-z /srv/bd3d" in drop and "umount -l /srv/bd3d" in drop
+
+
+def test_updater_migrates_only_while_the_share_is_on_the_old_mount_point(tmp_path: Path) -> None:
+    # update.sh re-runs install.sh while smb.conf still shares /srv/bd3d; a folder
+    # left behind (not empty) must not re-run it on every update (#196)
+    update = (ROOT / "scripts/update.sh").read_text(encoding="utf-8")
+    assert "[ -e /srv/bd3d ]" not in update
+    pattern = update.split("grep -qsE '", 1)[1].split("'", 1)[0]
+    old = "[Disks]\n   path = /srv/bd3d\n   read only = yes\n"
+    new = "[Spinema]\n   path = /srv/spinema\n   read only = yes\n"
+    for conf, migrate in ((old, True), (new, False)):
+        smb = tmp_path / "smb.conf"
+        smb.write_text(conf, encoding="utf-8")
+        found = subprocess.run(["grep", "-qsE", pattern, str(smb)], check=False).returncode == 0
+        assert found is migrate
