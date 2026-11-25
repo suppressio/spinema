@@ -383,7 +383,7 @@ def prepare_mount_point(mount: str) -> None:
         os.makedirs(mount)
     except FileExistsError as e:
         # a FUSE mount left by a crash: isdir() fails (ENOTCONN), mkdir says EEXIST
-        raise SystemExit(f"cannot use {mount}: a mount left over from a crash? "
+        raise SystemExit(f"cannot use {mount}: not a folder, or a mount left over from a crash? "
                          f"Free it with 'fusermount3 -u {mount}' and start spinema again") from e
     except OSError as e:
         raise SystemExit(f"cannot create the mount point {mount}: {e.strerror}. Use a --mount "
