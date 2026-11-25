@@ -285,6 +285,26 @@ def test_mount_waits_for_the_mount_point(monkeypatch: pytest.MonkeyPatch,
         release.set()
 
 
+def test_mount_fails_when_the_mount_point_never_appears(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    release = threading.Event()
+
+    def fake_fuse(fs: Bd3dFS, mount_point: str, **_: object) -> None:
+        fs.init_with_config(None, None)
+        release.wait(10)
+
+    monkeypatch.setattr(fuse_fs, "_libfuse", SimpleNamespace(
+        fuse_get_context=lambda: SimpleNamespace(contents=SimpleNamespace(fuse=1))))
+    monkeypatch.setattr(fuse_fs.mfusepy, "FUSE", fake_fuse)
+    monkeypatch.setattr(fuse_fs, "MOUNT_WAIT", 0.2)
+    monkeypatch.setattr(fuse_fs, "_mounted", None)
+    try:
+        with pytest.raises(SystemExit, match="the folder did not appear"):
+            fuse_fs.mount(Tree(), str(tmp_path / "Disks"))
+    finally:
+        release.set()
+
+
 def test_serve_fails_when_libfuse_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     # libfuse ending on an error after the mount must fail the program, not
     # look like an unmount from outside

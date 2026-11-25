@@ -143,7 +143,9 @@ class SsdpResponder:
         while not self._stop.is_set():
             try:
                 data, addr = sock.recvfrom(4096)
-            except TimeoutError:
+            # Windows: an answer that got "port unreachable" back (the client
+            # closed its port) fails the next recvfrom on this UDP socket
+            except (TimeoutError, ConnectionResetError):
                 data, addr = b"", None
             except OSError:
                 break

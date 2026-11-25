@@ -81,3 +81,23 @@ def test_the_socket_is_bound_where_the_platform_allows(monkeypatch: pytest.Monke
     monkeypatch.setattr(ssdp.threading, "Thread", Mock())
     r.start()
     assert bound == [(f"bind:{ssdp.MULTICAST_ADDR}", ssdp.PORT)]
+
+
+def test_a_reset_from_a_gone_client_does_not_stop_the_responder() -> None:
+    # Windows reports an ICMP "port unreachable" for an earlier answer as
+    # WSAECONNRESET on the next recvfrom: discovery must go on
+    r = ssdp.SsdpResponder("http://x/description.xml", "u", "urn:d", [], "test")
+    sock = Mock()
+    calls = iter([ConnectionResetError(10054, "reset"), TimeoutError()])
+
+    def recvfrom(size: int) -> tuple[bytes, tuple[str, int]]:
+        err = next(calls, None)
+        if err is None:
+            r._stop.set()
+            raise TimeoutError
+        raise err
+
+    sock.recvfrom.side_effect = recvfrom
+    r._sock = sock
+    r._run()
+    assert sock.recvfrom.call_count == 3      # went on after the reset
