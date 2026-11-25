@@ -54,6 +54,16 @@ WRAP
     sudo chmod 755 /usr/local/bin/spinema
 }
 
+# /srv/bd3d: the mount point used before the Disks/Spinema rename (spinema now
+# creates and mounts Disks inside $BASE itself). Lazy unmount: `mountpoint`
+# says no to a FUSE mount left by a crash, whose folder rmdir cannot remove
+drop_old_mount() {
+    fusermount3 -u -z /srv/bd3d 2>/dev/null || sudo umount -l /srv/bd3d 2>/dev/null || true
+    if ! sudo rmdir /srv/bd3d 2>/dev/null && sudo test -e /srv/bd3d; then
+        echo "warning: /srv/bd3d is no longer used but could not be removed (not empty?)"
+    fi
+}
+
 [ "$(id -u)" -ne 0 ] || { echo "Run as your normal user, not as root."; exit 1; }
 command -v apt-get >/dev/null || { echo "This script supports Debian/Ubuntu (apt) only."; exit 1; }
 
@@ -132,15 +142,10 @@ echo "$SHARE" | sudo tee "$PREFIX/app/share" >/dev/null
 write_command
 
 step "4/5 FUSE mount point"
+drop_old_mount
 if [ "$SHARE" = dlna ]; then
     echo "skipped (--share dlna: no FUSE mount needed)"
 else
-    # the mount point used before the Disks/Spinema rename: spinema creates and
-    # mounts Disks inside $BASE itself, so this is left over once empty
-    if mountpoint -q /srv/bd3d; then
-        fusermount3 -u /srv/bd3d || sudo umount /srv/bd3d || true
-    fi
-    sudo rmdir /srv/bd3d 2>/dev/null || true
     sudo install -d -o "$ME" -g "$(id -gn)" "$BASE"
     if ! grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null; then
         echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null

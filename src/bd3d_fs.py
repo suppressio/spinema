@@ -375,6 +375,25 @@ def write_structure(sources_args: list[str], out: str) -> None:
     log.info("%s: structure written to %s", source, out)
 
 
+def prepare_mount_point(mount: str) -> None:
+    """Create the FUSE mount point, e.g. Disks/ inside the installer's /srv/spinema."""
+    if os.path.isdir(mount):
+        return
+    try:
+        os.makedirs(mount)
+    except FileExistsError as e:
+        # a FUSE mount left by a crash: isdir() fails (ENOTCONN), mkdir says EEXIST
+        raise SystemExit(f"cannot use {mount}: a mount left over from a crash? "
+                         f"Free it with 'fusermount3 -u {mount}' and start spinema again") from e
+    except OSError as e:
+        raise SystemExit(f"cannot create the mount point {mount}: {e.strerror}. Use a --mount "
+                         "folder you can write to; with the .deb, log in again after being "
+                         "added to group spinema") from e
+    # with the .deb, /srv/spinema belongs to group spinema: whoever starts spinema
+    # first creates Disks, and the other members must be able to mount on it too
+    os.chmod(mount, os.stat(mount).st_mode | stat.S_IWGRP)
+
+
 def main() -> None:
     args = build_parser().parse_args()
     sources_args: list[str] = args.sources
@@ -422,7 +441,7 @@ def main() -> None:
     if use_fuse:
         require_fuse(share)
         require_samba(share)
-        os.makedirs(mount, exist_ok=True)   # e.g. Disks/ inside the installer's /srv/spinema
+        prepare_mount_point(mount)
         import fuse_fs  # noqa: PLC0415
         fuse_fs.mount(tree, mount)
     dlna: Dlna | None = None

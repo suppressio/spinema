@@ -325,6 +325,40 @@ def test_mount_default_is_disks_inside_the_installed_share() -> None:
     assert bd3d_fs.build_parser().parse_args(["x.mkv"]).mount == "/srv/spinema/Disks"
 
 
+def test_mount_point_is_created_group_writable(tmp_path: Path) -> None:
+    # the .deb's /srv/spinema is shared by group spinema: whoever starts spinema
+    # first creates Disks, and the other members must be able to mount on it too
+    mount = tmp_path / "spinema" / "Disks"
+    bd3d_fs.prepare_mount_point(str(mount))
+    assert mount.is_dir()
+    if sys.platform != "win32":
+        assert mount.stat().st_mode & 0o020
+
+
+def test_mount_point_left_by_a_crash_says_how_to_free_it(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # a FUSE mount left by a crash: isdir() is False (ENOTCONN), mkdir says EEXIST
+    mount = str(tmp_path / "Disks")
+    monkeypatch.setattr(bd3d_fs.os, "makedirs",
+                        Mock(side_effect=FileExistsError(17, "File exists", mount)))
+    with pytest.raises(SystemExit) as error:
+        bd3d_fs.prepare_mount_point(mount)
+    assert f"fusermount3 -u {mount}" in str(error.value)
+
+
+def test_mount_point_not_writable_is_a_clear_message(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # e.g. a .deb user added to group spinema who has not logged in again yet
+    mount = str(tmp_path / "Disks")
+    monkeypatch.setattr(bd3d_fs.os, "makedirs",
+                        Mock(side_effect=PermissionError(13, "Permission denied", mount)))
+    with pytest.raises(SystemExit) as error:
+        bd3d_fs.prepare_mount_point(mount)
+    message = str(error.value)
+    assert f"cannot create the mount point {mount}" in message
+    assert "group spinema" in message
+
+
 def test_http_port_default_avoids_the_minidlna_port() -> None:
     # 8200 is minidlna's own default; sharing it with a common home-server
     # package would make --share dlna/both fail to start out of the box
