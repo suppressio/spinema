@@ -822,7 +822,7 @@ class BlurayDiscSource(DiscSource):
             titles = sorted(disc.titles(), key=lambda t: t.playlist)
             # Read the first clip of each playlist to deduplicate alternate-audio/subtitle
             # variants: same opening clip = same episode (variants may append short clips
-            # for language cards or warnings; keep the lowest playlist number per episode).
+            # for language cards or warnings; one title per episode is kept, see the dedup below).
             # The full PlayItem list is kept too, to find a play-all playlist afterwards.
             langs: dict[str, frozenset[str]] = {}
             items_by_playlist: dict[str, list[PlayItem]] = {}
@@ -879,7 +879,7 @@ class BlurayDiscSource(DiscSource):
 
             # Deduplicate: keep only one title per opening clip, removing
             # alternate-audio/subtitle variants. On a 3D disc the 3D variant of an
-            # episode (#189), else the lowest playlist number, as today.
+            # episode (#189), else the lowest playlist number.
             best_by_sig: dict[str, bluray.Title] = {}
             sig_order: list[str] = []
             for t in candidates:
