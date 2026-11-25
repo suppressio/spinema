@@ -501,6 +501,33 @@ def test_bluray_all_on_variants_of_one_episode(
     assert (found[0].playlist, found[0].name) == ("00002", "Rick and Morty Staffel1")
 
 
+@pytest.mark.parametrize(("dep_clips", "expected"), [
+    ({"00002": ["00011"], "00004": ["00021"]}, ["00002", "00004"]),
+    ({}, ["00001", "00003"]),
+])
+def test_bluray_all_on_3d_variant_of_episode(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        dep_clips: dict[str, list[str]], expected: list[str]) -> None:
+    """#189: each episode has a 2D playlist (the lower number) and a 3D one sharing its
+    opening clip. On a 3D disc (dep_clips set, has_3d True) the dedup must keep the 3D
+    variant of each episode, not the lowest number; on a 2D disc nothing changes."""
+    iso = tmp_path / "Series.iso"
+    iso.write_text("")
+    disc = MultiEpisodeBluray({
+        "00001": [_ep("00010")],
+        "00002": [_ep("00010")],
+        "00003": [_ep("00020")],
+        "00004": [_ep("00020")],
+    }, dep_clips=dep_clips)
+
+    def open_disc(path: str) -> tuple[MultiEpisodeBluray, DiscInfo, dict[str, str]]:
+        return disc, disc.info(), {}
+
+    monkeypatch.setattr(sources, "_open_disc", open_disc)
+    found = [s for s in BlurayDiscSource.all_on(str(iso)) if isinstance(s, BlurayDiscSource)]
+    assert [s.playlist for s in found] == expected
+
+
 @pytest.mark.parametrize("duration", [1200, 200])
 def test_bluray_all_on_malformed_mpls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                                       caplog: pytest.LogCaptureFixture, duration: int) -> None:
