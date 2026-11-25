@@ -14,9 +14,9 @@ video; --share dlna announces the same files over DLNA/UPnP instead (no FUSE
 mount, no Samba), for players that browse a media server (dlna.py).
 
 Usage:
-    python3 bd3d_fs.py [--mount /srv/bd3d] ~/Videos/3D [more MKVs or folders...]
+    python3 bd3d_fs.py [--mount /srv/spinema/Disks] ~/Videos/3D [more MKVs or folders...]
     python3 bd3d_fs.py                      # no source: watch every /dev/sr* found
-Unmount: Ctrl+C (or fusermount3 -u /srv/bd3d)
+Unmount: Ctrl+C (or fusermount3 -u /srv/spinema/Disks)
 
 Requires: edge264mvc_test, ffmpeg, ffprobe; fuse3 (libfuse3) for --share samba/both
 (fuse_fs.py, through the vendored mfusepy.py)
@@ -267,7 +267,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "to scan recursively. None given: watch every optical drive "
                              "found on this machine (/dev/sr*)")
     parser.add_argument("--version", action="version", version=f"spinema {program_version()}")
-    parser.add_argument("--mount", default="/srv/bd3d", help="mount point (default /srv/bd3d)")
+    parser.add_argument("--mount", default="/srv/spinema/Disks",
+                        help="mount point (default /srv/spinema/Disks)")
     parser.add_argument("--audio-lang", default="all",
                         help="audio languages to offer, e.g. ita,eng, or all (default: every "
                              "language on the disc, one track each)")
@@ -421,6 +422,7 @@ def main() -> None:
     if use_fuse:
         require_fuse(share)
         require_samba(share)
+        os.makedirs(mount, exist_ok=True)   # e.g. Disks/ inside the installer's /srv/spinema
         import fuse_fs  # noqa: PLC0415
         fuse_fs.mount(tree, mount)
     dlna: Dlna | None = None

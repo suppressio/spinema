@@ -13,7 +13,7 @@ Come avviare il programma da un clone, dove stanno le cose nel codice, cosa cont
 1. Fai una volta l'installazione nativa (lo [script nativo](../README.it.md#script-nativo-da-una-copia-del-progetto) nel README), compresa la condivisione Samba. Installa anche tutto quello che serve a un clone:
    - i pacchetti di sistema (FFmpeg, libbluray, libdvdread, fuse3; Samba quando usi la condivisione Samba);
    - il decoder edge264 in `/opt/spinema/bin`;
-   - il punto di montaggio `/srv/bd3d`;
+   - la cartella semplice `/srv/spinema` (spinema monta `Disks` al suo interno a ogni avvio);
    - `user_allow_other` in `/etc/fuse.conf`.
 2. Avvia il programma dal clone invece che dalla copia installata:
 
@@ -23,10 +23,10 @@ Come avviare il programma da un clone, dove stanno le cose nel codice, cosa cont
    ```
 
    La prima riga del log dà la versione, per esempio `spinema v1.1.0-2-gabc1234`: due commit dopo la v1.1.0.
-3. Fermalo con **Ctrl+C**: smonta `/srv/bd3d` e cancella i suoi file temporanei.
+3. Fermalo con **Ctrl+C**: smonta `/srv/spinema/Disks` e cancella i suoi file temporanei.
 
 - **Una copia alla volta.** Quella installata e quella del clone usano lo stesso punto di montaggio. La seconda non parte, e un messaggio lo spiega.
-- **Dopo un crash, o un `kill -9`,** il punto di montaggio resta occupato: `fusermount3 -u /srv/bd3d`.
+- **Dopo un crash, o un `kill -9`,** il punto di montaggio resta occupato: `fusermount3 -u /srv/spinema/Disks`.
 - **VS Code:** apri la cartella e scegli `.venv` come interprete; lo crea `scripts/check.sh`. `.vscode/` spegne Pylint, perché i controlli sono quelli di `pyproject.toml`.
 
 ---
@@ -58,7 +58,7 @@ Come avviare il programma da un clone, dove stanno le cose nel codice, cosa cont
 | `tools/bdprobe.c` | La prima sonda del progetto (fase 0 della roadmap): apre un disco con libbluray e salva l'inizio del flusso 3D. |
 | `src/mfusepy.py` | Adapter FUSE vendored usato solo dal percorso Samba/both; viene caricato condizionalmente e parla con il runtime libfuse3 di sistema. |
 
-Il percorso di un pezzo di file, dal player al disco: il player legge dei byte da un file in `/srv/bd3d` → `fuse_fs.py` passa la lettura a `VirtualFile.read()` (`library.py`), che trasforma il byte in un istante (il bitrate è costante) → se nessuna pipeline è a quell'istante, ne avvia una: il lettore della sorgente (`disc_reader.py`, `dvd_reader.py` o FFmpeg per gli MKV), poi il decoder (edge264 per il 3D, altrimenti FFmpeg), poi FFmpeg che codifica il `.ts` → i byte tornano al player. `--share dlna` usa lo stesso albero e la stessa `VirtualFile.read()` (`FileEntry` in `tree.py`), passando per la gestione del Range di `http_server.py` invece di una lettura FUSE; `dlna.py` aggiunge solo la descrizione UPnP e la scoperta.
+Il percorso di un pezzo di file, dal player al disco: il player legge dei byte da un file in `/srv/spinema/Disks` → `fuse_fs.py` passa la lettura a `VirtualFile.read()` (`library.py`), che trasforma il byte in un istante (il bitrate è costante) → se nessuna pipeline è a quell'istante, ne avvia una: il lettore della sorgente (`disc_reader.py`, `dvd_reader.py` o FFmpeg per gli MKV), poi il decoder (edge264 per il 3D, altrimenti FFmpeg), poi FFmpeg che codifica il `.ts` → i byte tornano al player. `--share dlna` usa lo stesso albero e la stessa `VirtualFile.read()` (`FileEntry` in `tree.py`), passando per la gestione del Range di `http_server.py` invece di una lettura FUSE; `dlna.py` aggiunge solo la descrizione UPnP e la scoperta.
 
 Il codice, i commenti e i messaggi del log sono in inglese. La documentazione è in due lingue: ogni file `.md` ha il suo gemello `.it.md`, da cambiare insieme.
 
@@ -208,7 +208,7 @@ Con la decifratura di MakeMKV il comando comincia con `LIBAACS_PATH=libmmbd LIBB
 Un pezzo di file virtuale, come lo riceve un player:
 
 ```bash
-f="/srv/bd3d/Blu-ray 3D/ITA - Film - 3D SBS.ts"
+f="/srv/spinema/Disks/Blu-ray 3D/ITA - Film - 3D SBS.ts"
 dd if="$f" bs=188 skip=5000000 count=20000 status=none > /tmp/pezzo.ts
 ffprobe -hide_banner /tmp/pezzo.ts
 ```

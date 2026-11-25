@@ -320,6 +320,11 @@ def test_http_port_accepts_a_real_port() -> None:
     assert bd3d_fs.build_parser().parse_args(["--http-port", "8200", "x.mkv"]).http_port == 8200
 
 
+def test_mount_default_is_disks_inside_the_installed_share() -> None:
+    # the installer only creates /srv/spinema: spinema mounts Disks inside it (#196)
+    assert bd3d_fs.build_parser().parse_args(["x.mkv"]).mount == "/srv/spinema/Disks"
+
+
 def test_http_port_default_avoids_the_minidlna_port() -> None:
     # 8200 is minidlna's own default; sharing it with a common home-server
     # package would make --share dlna/both fail to start out of the box
@@ -383,7 +388,8 @@ def test_share_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     drive = tmp_path / "sr0"
     drive.touch()
     monkeypatch.setattr(sys, "argv", ["bd3d_fs.py", "--share", share, "--log", "none",
-                                      "--loader", "none", str(drive)])
+                                      "--loader", "none", "--mount", str(tmp_path / "mnt"),
+                                      str(drive)])
     monkeypatch.setattr(bd3d_fs.stat, "S_ISBLK", Mock(return_value=True))
     monkeypatch.setattr(bd3d_fs, "pick_encoder", Mock(return_value=("x264", "")))
     monkeypatch.setattr(bd3d_fs.shutil, "which", which)
@@ -413,11 +419,13 @@ def test_share_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
             which.assert_not_called()
             import_module.assert_not_called()
             fuse.mount.assert_not_called()
+            assert not (tmp_path / "mnt").exists()
         else:
             which.assert_called_once()
             assert which.call_args.args == ("smbd",)
             fuse.mount.assert_called_once()
             fuse.unmount.assert_called_once()
+            assert (tmp_path / "mnt").is_dir()   # created for the FUSE mount (#196)
 
 
 def test_no_sources_watches_every_drive_found(monkeypatch: pytest.MonkeyPatch) -> None:

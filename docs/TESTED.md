@@ -22,7 +22,7 @@ What this project has been tried with so far, and how it went. The [README](../R
 ✅ **Works, 3D included.** The player the project was first built for.
 
 - [ ] Open the **3D Player**, go to the **Local network** tab and add the PC: its IP address (`hostname -I` on the PC tells you), guest / anonymous access.
-- [ ] Open **Disks**, then the folder and the movie (go back and in again if a folder looks empty).
+- [ ] Open **Spinema**, then **Disks**, then the folder and the movie (go back and in again if a folder looks empty).
 - [ ] The player recognizes the side-by-side format and switches to 3D by itself. 🎉
 
 ![Playback in the VITURE 3D Player: 3D on, seek bar, the file's name](screenshots/viture-3d-playback.png)
@@ -41,7 +41,7 @@ Good to know:
 
 - [ ] Open **File Manager** from the bottom bar, then **Local Network** on the left. The PC shows up by itself (by name and by IP address).
 - [ ] The first time, a **Security Risk** notice says the connection is not encrypted: **Got it** (it is your home network, and the share is read-only).
-- [ ] Open **Disks**, then the folder and the movie.
+- [ ] Open **Spinema**, then **Disks**, then the folder and the movie.
 - [ ] If the picture shows two images side by side, press the cube button in the player bar (**Switch Mode**): **Non-VR** and **3D SBS**.
 - [ ] In the gear menu (**Advanced Settings → Aspect Ratio**) choose **16:9**. 16:10 fills the screen more, but stretches the picture a bit in height. 🎉
 

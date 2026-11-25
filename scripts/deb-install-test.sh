@@ -36,7 +36,7 @@ spinema --version
 python3 -c "import sys; sys.path.insert(0, '$app'); import bd3d_fs"
 
 if [ "$mode" = recommends ]; then
-    testparm -s | grep -q '^\[Disks\]$'
+    testparm -s | grep -q '^\[Spinema\]$'
     grep -qxF user_allow_other /etc/fuse.conf
     # loads libfuse3 through mfusepy and builds the adapter, without mounting
     python3 - "$app" <<'PY'
@@ -73,6 +73,7 @@ fi
 apt-get remove -y spinema
 # "! cmd" does not trip set -e: fail explicitly
 if grep -qsF '# >>> spinema >>>' /etc/samba/smb.conf; then exit 1; fi
+test ! -e /srv/spinema
 test ! -e /srv/bd3d
 if [ "$mode" = recommends ]; then
     grep -qxF user_allow_other /etc/fuse.conf
