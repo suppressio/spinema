@@ -13,7 +13,7 @@ How to run the program from a clone, where things are in the code, what the test
 1. Run the native install once (the [native script](../README.md#native-script-from-a-clone) in the README), including the Samba share. It installs everything a clone needs as well:
    - the system packages (FFmpeg, libbluray, libdvdread, fuse3; Samba when using the Samba share);
    - the edge264 decoder in `/opt/spinema/bin`;
-   - the mount point `/srv/bd3d`;
+   - the plain folder `/srv/spinema` (spinema mounts `Disks` inside it at every start);
    - `user_allow_other` in `/etc/fuse.conf`.
 2. Start the program from the clone instead of the installed copy:
 
@@ -23,10 +23,10 @@ How to run the program from a clone, where things are in the code, what the test
    ```
 
    The first log line gives the version, e.g. `spinema v1.1.0-2-gabc1234`: two commits after v1.1.0.
-3. Stop it with **Ctrl+C**: it unmounts `/srv/bd3d` and removes its temporary files.
+3. Stop it with **Ctrl+C**: it unmounts `/srv/spinema/Disks` and removes its temporary files.
 
 - **Only one copy at a time.** The installed one and the one in the clone use the same mount point. The second refuses to start, with a message that says so.
-- **After a crash, or a `kill -9`,** the mount point stays busy: `fusermount3 -u /srv/bd3d`.
+- **After a crash, or a `kill -9`,** the mount point stays busy: `fusermount3 -u /srv/spinema/Disks`.
 - **VS Code:** open the folder and pick `.venv` as the interpreter; `scripts/check.sh` creates it. `.vscode/` turns Pylint off, because the checks are the ones in `pyproject.toml`.
 
 ---
@@ -42,7 +42,7 @@ How to run the program from a clone, where things are in the code, what the test
 | `src/bluray.py` | A small ctypes binding to libbluray: it opens a disc, ISO or folder, and reads its files decrypted. |
 | `src/osplatform.py` | The calls that differ by OS: drive status, the drives to look at, loading a shared library, and the default temp dir and log path. Linux is the only one implemented today. Named osplatform, not platform, to avoid shadowing the standard library module of that name. |
 | `src/bdmv.py` | Blu-ray navigation files: playlists (MPLS), clip info (CLPI), seeking in the `.ssif`. |
-| `src/disc_reader.py` | Reads a Blu-ray title from a given time. 3D: video for edge264 on stdout and audio into a FIFO. 2D: one filtered TS stream. It runs as its own process. |
+| `src/disc_reader.py` | Reads a Blu-ray title from a given time. 3D: video for edge264 on stdout and audio to ffmpeg over loopback TCP. 2D: one filtered TS stream. It runs as its own process. |
 | `src/ssif_demux.py` | Splits the 3D `.ssif` stream into H.264 plus MVC for edge264. |
 | `src/dvd.py` | libdvdread through ctypes, the IFO files, the choice of the main title or the episodes, and the exact seek. |
 | `src/dvd_reader.py` | Reads a DVD title from a given time as an MPEG program stream for FFmpeg. It runs as its own process. |
@@ -58,7 +58,7 @@ How to run the program from a clone, where things are in the code, what the test
 | `tools/bdprobe.c` | The first probe of the project (roadmap phase 0): it opens a disc with libbluray and dumps the start of the 3D stream. |
 | `src/mfusepy.py` | Vendored FUSE adapter used only by the Samba/both path; it is loaded conditionally and talks to the system libfuse3 runtime. |
 
-The path of a piece of the file, from the player to the disc: the player reads bytes from a file in `/srv/bd3d` → `fuse_fs.py` hands the read to `VirtualFile.read()` (`library.py`), which turns the byte into a time (the bitrate is constant) → if no pipeline is at that time, it starts one: the source's reader (`disc_reader.py`, `dvd_reader.py` or FFmpeg for MKV), then the decoder (edge264 for 3D, FFmpeg otherwise), then FFmpeg encoding the `.ts` → the bytes go back to the player. `--share dlna` takes the same tree and the same `VirtualFile.read()` (`FileEntry` in `tree.py`), through `http_server.py`'s Range handling instead of a FUSE read; `dlna.py` only adds the UPnP description and discovery on top.
+The path of a piece of the file, from the player to the disc: the player reads bytes from a file in `/srv/spinema/Disks` → `fuse_fs.py` hands the read to `VirtualFile.read()` (`library.py`), which turns the byte into a time (the bitrate is constant) → if no pipeline is at that time, it starts one: the source's reader (`disc_reader.py`, `dvd_reader.py` or FFmpeg for MKV), then the decoder (edge264 for 3D, FFmpeg otherwise), then FFmpeg encoding the `.ts` → the bytes go back to the player. `--share dlna` takes the same tree and the same `VirtualFile.read()` (`FileEntry` in `tree.py`), through `http_server.py`'s Range handling instead of a FUSE read; `dlna.py` only adds the UPnP description and discovery on top.
 
 The code, its comments and the log messages are in English. The documentation is in two languages: every `.md` file has an `.it.md` twin, to be changed together.
 
@@ -77,7 +77,7 @@ scripts/check.sh --integration    # also the tests on the disc in the drive
 - **shellcheck**: the scripts in `scripts/` and `docker/`;
 - **the unit tests**.
 
-The first run creates `.venv` with the pinned tools from `requirements-dev.txt`. The program's own dependencies come from the system. GitHub runs the same script on Ubuntu 24.04, macOS and Windows (`.github/workflows/check.yml`): the unit tests, ruff and pyright stay green on all three while the v1.3 refactor makes the core portable; macOS and Windows skip whatever still needs Linux only (FUSE, the drive ioctl, `os.killpg`/`os.mkfifo`, the SIGTERM shutdown test; `dpkg` for the Debian version checks) and run no integration tests (no disc, no FUSE there). A pytest skip does not hide code from pyright: a POSIX-only call sits behind `if sys.platform != "win32"` (or after `if sys.platform == "win32": raise ...`), which pyright reads as a platform boundary.
+The first run creates `.venv` with the pinned tools from `requirements-dev.txt`. The program's own dependencies come from the system. GitHub runs the same script on Ubuntu 24.04, macOS and Windows (`.github/workflows/check.yml`): the unit tests, ruff and pyright stay green on all three while the v1.3 refactor makes the core portable; macOS and Windows skip whatever still needs Linux only (FUSE, the drive ioctl, the SIGTERM shutdown test; `dpkg` for the Debian version checks) and run no integration tests (no disc, no FUSE there). A pytest skip does not hide code from pyright: a POSIX-only call sits behind `if sys.platform != "win32"` (or after `if sys.platform == "win32": raise ...`), which pyright reads as a platform boundary.
 
 ### Unit tests (`tests/`)
 
@@ -208,10 +208,23 @@ With MakeMKV's decryption, the command starts with `LIBAACS_PATH=libmmbd LIBBDPL
 A piece of a virtual file, as a player gets it:
 
 ```bash
-f="/srv/bd3d/Blu-ray 3D/ITA - Movie - 3D SBS.ts"
+f="/srv/spinema/Disks/Blu-ray 3D/ITA - Movie - 3D SBS.ts"
 dd if="$f" bs=188 skip=5000000 count=20000 status=none > /tmp/piece.ts
 ffprobe -hide_banner /tmp/piece.ts
 ```
+
+## Windows: the edge264 decoder
+
+The Windows port (#10) decodes 3D with the same edge264-mvc as Linux, cross-compiled from Linux at the commit `scripts/install.sh` pins:
+
+```bash
+sudo apt install gcc-mingw-w64-x86-64-posix make git
+scripts/build-edge264-windows.sh            # dist/windows/: edge264mvc_test.exe, edge264mvc.2.dll, LICENSE_BSD.txt, edge264.commit
+```
+
+The two files go side by side and need nothing else: MinGW's runtime and winpthreads are linked in statically, they only import `KERNEL32.dll` and `msvcrt.dll`. edge264's BSD licence (`LICENSE_BSD.txt`) must ship with them. The build is portable like the `.deb`'s (baseline x86-64, faster variants picked at run time).
+
+To check a build, decode the same input on Linux and on Windows and compare the frames: `edge264mvc_test - -O < input.264` on both, then an MD5 per Y4M frame. The input is what `disc_reader.py` writes for a 3D title (see *Taking a pipeline apart*). Checked for #105 on a Windows 11 VM with 2 cores: every frame identical to Linux (1243 frames of a 3D Blu-ray), about 4.3× real time (Linux on 2 cores of the host: about 6×).
 
 ---
 

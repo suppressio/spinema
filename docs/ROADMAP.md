@@ -14,7 +14,7 @@ Legacy 3D.
 
 What's done:
 
-- [x] **2D Blu-ray** and **DVD**, each in its own folder of the `Disks` share.
+- [x] **2D Blu-ray** and **DVD**, each in its own folder inside `Disks`, in the `Spinema` share.
   FFmpeg's `dvdvideo` demuxer seeks only approximately (seconds off, without
   knowing where it landed), so DVDs have their own reader: libdvdread + IFO
   parsing, seek through the navigation packs (exact).

@@ -1,6 +1,4 @@
-import shlex
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -39,13 +37,17 @@ def test_heavy_quality(kind: str, video: int, muxrate: int) -> None:
 
 
 def test_encoder_args() -> None:
-    assert encoder_args("x264", 20_000_000) == (
-        "-c:v libx264 -preset veryfast -b:v 20000k -maxrate 20000k -bufsize 10000k "
-        "-x264-params nal-hrd=cbr")
-    assert "-rc cbr -b:v 8000k -maxrate 8000k -bufsize 4000k" in encoder_args("nvenc", 8_000_000)
-    assert encoder_args("vaapi", 8_000_000, "/dev/dri/renderD128") == (
-        "-vaapi_device /dev/dri/renderD128 -c:v h264_vaapi -rc_mode CBR -b:v 8000k "
-        "-maxrate 8000k -bufsize 4000k")
+    assert encoder_args("x264", 20_000_000) == [
+        "-c:v", "libx264", "-preset", "veryfast", "-b:v", "20000k", "-maxrate", "20000k",
+        "-bufsize", "10000k", "-x264-params", "nal-hrd=cbr"]
+    nvenc = encoder_args("nvenc", 8_000_000)
+    assert nvenc[nvenc.index("-rc") + 1] == "cbr"
+    assert nvenc[nvenc.index("-b:v") + 1] == "8000k"
+    assert nvenc[nvenc.index("-maxrate") + 1] == "8000k"
+    assert nvenc[nvenc.index("-bufsize") + 1] == "4000k"
+    assert encoder_args("vaapi", 8_000_000, "/dev/dri/renderD128") == [
+        "-vaapi_device", "/dev/dri/renderD128", "-c:v", "h264_vaapi", "-rc_mode", "CBR",
+        "-b:v", "8000k", "-maxrate", "8000k", "-bufsize", "4000k"]
 
 
 def test_filter_suffix() -> None:
@@ -177,53 +179,49 @@ def three_d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> BlurayDiscSource
     return BlurayDiscSource(str(tmp_path / "t.iso"), ["ita"])
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="3D audio uses os.mkfifo, POSIX only until #103")
 def test_decode_3d(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     s = three_d(monkeypatch, tmp_path)
     assert quality_for(s, "light") == QUALITIES[("3d", "light")]
-    cmd = decode_command(s, 12.0, "OUT")
-    parts = [p.strip() for p in cmd.split("|")]
-    assert "disc_reader.py" in parts[0]
-    assert parts[1] == "edge264mvc_test - -O"
-    assert parts[2] == (f"ffmpeg -nostdin -v warning -i -  {s.audio_input(12.0)} -map 0:v "
-                        f"{s.audio_map()} OUT")
+    stages = decode_command(s, 12.0, ["OUT"])
+    assert len(stages) == 3
+    assert any("disc_reader.py" in part for part in stages[0])
+    assert stages[1] == ["edge264mvc_test", "-", "-O"]
+    assert stages[2] == ["ffmpeg", "-nostdin", "-v", "warning", "-i", "-", *s.audio_input(12.0),
+                         "-map", "0:v", *s.audio_map(), "OUT"]
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="3D audio uses os.mkfifo, POSIX only until #103")
 def test_decode_3d_subtitles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     s = three_d(monkeypatch, tmp_path)
     s.sub, s.sub_depth = s.subs[0], 10
-    ffmpeg = decode_command(s, 12.0, "OUT").split("|")[2]
+    ffmpeg = decode_command(s, 12.0, ["OUT"])[2]
     # the subtitle comes with the audio (input 1), on a 1920x1080 canvas, drawn in
     # both eyes, each copy moved inward
-    assert "-canvas_size 1920x1080" in ffmpeg
-    assert ffmpeg.index("-canvas_size") < ffmpeg.index(s.audio_input(12.0))
-    graph = shlex.split(ffmpeg)[shlex.split(ffmpeg).index("-filter_complex") + 1]
+    assert ffmpeg[ffmpeg.index("-canvas_size") + 1] == "1920x1080"
+    assert ffmpeg.index("-canvas_size") < ffmpeg.index("-f")      # "-f" opens audio_input()
+    graph = ffmpeg[ffmpeg.index("-filter_complex") + 1]
     assert graph == ("[1:i:0x1200]split[sa][sb];[0:v][sa]overlay=x=10:y=0:eof_action=pass[l];"
                      "[l][sb]overlay=x=1910:y=0:eof_action=pass[v]")
     s.forced_only = True
-    assert "-canvas_size 1920x1080 -forced_subs_only 1" in decode_command(s, 0, "OUT")
+    ffmpeg = decode_command(s, 0, ["OUT"])[2]
+    i = ffmpeg.index("-canvas_size")
+    assert ffmpeg[i:i + 4] == ["-canvas_size", "1920x1080", "-forced_subs_only", "1"]
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="3D audio uses os.mkfifo, POSIX only until #103")
 def test_decode_3d_filter_suffix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The 3D path without subtitles has no filter_complex at all today (plain
     -map 0:v): a non-empty filter_suffix (VAAPI) must still get one, with the
     suffix appearing exactly once."""
     s = three_d(monkeypatch, tmp_path)
-    ffmpeg = decode_command(s, 12.0, "OUT", VAAPI_SUFFIX).split("|")[2]
-    assert ffmpeg.count(VAAPI_SUFFIX) == 1
-    assert "-map 0:v" not in ffmpeg
-    graph = shlex.split(ffmpeg)[shlex.split(ffmpeg).index("-filter_complex") + 1]
+    ffmpeg = decode_command(s, 12.0, ["OUT"], VAAPI_SUFFIX)[2]
+    graph = ffmpeg[ffmpeg.index("-filter_complex") + 1]
+    assert graph.count(VAAPI_SUFFIX) == 1
+    assert "0:v" not in ffmpeg
     assert graph == f"[0:v]{VAAPI_SUFFIX}[v]"
 
     s.sub, s.sub_depth = s.subs[0], 10
-    ffmpeg = decode_command(s, 12.0, "OUT", VAAPI_SUFFIX).split("|")[2]
-    assert ffmpeg.count(VAAPI_SUFFIX) == 1
-    graph = shlex.split(ffmpeg)[shlex.split(ffmpeg).index("-filter_complex") + 1]
+    ffmpeg = decode_command(s, 12.0, ["OUT"], VAAPI_SUFFIX)[2]
+    graph = ffmpeg[ffmpeg.index("-filter_complex") + 1]
+    assert graph.count(VAAPI_SUFFIX) == 1
     assert graph == ("[1:i:0x1200]split[sa][sb];[0:v][sa]overlay=x=10:y=0:eof_action=pass[l];"
                      f"[l][sb]overlay=x=1910:y=0:eof_action=pass,{VAAPI_SUFFIX}[v]")
 
@@ -232,33 +230,37 @@ def test_decode_2d_bluray(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     (tmp_path / "t.iso").write_text("")
     monkeypatch.setattr(sources, "_open_disc", opener(FakeBluray(three_d=False)))
     s = BlurayDiscSource(str(tmp_path / "t.iso"), ["ita"])
-    cmd = decode_command(s, 5.0, "OUT")
-    assert "edge264" not in cmd
-    ffmpeg = cmd.split("|")[1]
-    assert "-f mpegts -analyzeduration 2000000 -probesize 10000000 -i -" in ffmpeg
-    assert shlex.split(ffmpeg)[shlex.split(ffmpeg).index("-filter_complex") + 1] == \
-        "[0:i:0x1011]null,null[v]"
+    stages = decode_command(s, 5.0, ["OUT"])
+    assert len(stages) == 2
+    assert not any("edge264" in part for stage in stages for part in stage)
+    ffmpeg = stages[1]
+    i = ffmpeg.index("-f")
+    assert ffmpeg[i:i + 8] == ["-f", "mpegts", "-analyzeduration", "2000000",
+                              "-probesize", "10000000", "-i", "-"]
+    assert ffmpeg[ffmpeg.index("-filter_complex") + 1] == "[0:i:0x1011]null,null[v]"
     s.sub = s.subs[1]
-    ffmpeg = decode_command(s, 5.0, "OUT").split("|")[1]
-    assert shlex.split(ffmpeg)[shlex.split(ffmpeg).index("-filter_complex") + 1] == \
+    ffmpeg = decode_command(s, 5.0, ["OUT"])[1]
+    assert ffmpeg[ffmpeg.index("-filter_complex") + 1] == \
         "[0:i:0x1011]null[pre];[pre][0:i:0x1201]overlay=eof_action=pass[ov];[ov]null[v]"
-    assert "-canvas_size 1920x1080" in ffmpeg
-    assert ffmpeg.rstrip().endswith("-map 0:i:0x1102 -metadata:s:a:0 language=ita OUT")
+    assert ffmpeg[ffmpeg.index("-canvas_size") + 1] == "1920x1080"
+    assert ffmpeg[-5:] == ["-map", "0:i:0x1102", "-metadata:s:a:0", "language=ita", "OUT"]
 
 
 def test_decode_2d_bluray_filter_suffix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     (tmp_path / "t.iso").write_text("")
     monkeypatch.setattr(sources, "_open_disc", opener(FakeBluray(three_d=False)))
     s = BlurayDiscSource(str(tmp_path / "t.iso"), ["ita"])
-    ffmpeg = decode_command(s, 5.0, "OUT", VAAPI_SUFFIX).split("|")[1]
-    assert ffmpeg.count(VAAPI_SUFFIX) == 1
-    assert shlex.split(ffmpeg)[shlex.split(ffmpeg).index("-filter_complex") + 1] == \
-        f"[0:i:0x1011]null,null,{VAAPI_SUFFIX}[v]"
+    ffmpeg = decode_command(s, 5.0, ["OUT"], VAAPI_SUFFIX)[1]
+    graph = ffmpeg[ffmpeg.index("-filter_complex") + 1]
+    assert graph.count(VAAPI_SUFFIX) == 1
+    assert graph == f"[0:i:0x1011]null,null,{VAAPI_SUFFIX}[v]"
     s.sub = s.subs[1]
-    ffmpeg = decode_command(s, 5.0, "OUT", VAAPI_SUFFIX).split("|")[1]
-    assert ffmpeg.count(VAAPI_SUFFIX) == 1
-    assert shlex.split(ffmpeg)[shlex.split(ffmpeg).index("-filter_complex") + 1] == \
-        f"[0:i:0x1011]null[pre];[pre][0:i:0x1201]overlay=eof_action=pass[ov];[ov]null,{VAAPI_SUFFIX}[v]"
+    ffmpeg = decode_command(s, 5.0, ["OUT"], VAAPI_SUFFIX)[1]
+    graph = ffmpeg[ffmpeg.index("-filter_complex") + 1]
+    assert graph.count(VAAPI_SUFFIX) == 1
+    assert graph == (
+        "[0:i:0x1011]null[pre];[pre][0:i:0x1201]overlay=eof_action=pass[ov];"
+        f"[ov]null,{VAAPI_SUFFIX}[v]")
 
 
 def test_decode_dvd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -266,11 +268,13 @@ def test_decode_dvd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(dvd, "Dvd", FakeDvd)
     s = DvdSource(str(tmp_path / "BTTF"), ["ita"])
     s.sub = s.subs[0]
-    ffmpeg = decode_command(s, 5.0, "OUT").split("|")[1]
-    assert "-ifo_palette" in ffmpeg and "-f mpeg " in ffmpeg
+    ffmpeg = decode_command(s, 5.0, ["OUT"])[1]
+    assert "-ifo_palette" in ffmpeg
+    assert ffmpeg[ffmpeg.index("-f") + 1] == "mpeg"
     # DVD titles often open with seconds without audio: ffmpeg looks further for it
-    assert "-analyzeduration 8000000 -probesize 20000000 -i -" in ffmpeg
-    assert shlex.split(ffmpeg)[shlex.split(ffmpeg).index("-filter_complex") + 1] == (
+    i = ffmpeg.index("-analyzeduration")
+    assert ffmpeg[i:i + 6] == ["-analyzeduration", "8000000", "-probesize", "20000000", "-i", "-"]
+    assert ffmpeg[ffmpeg.index("-filter_complex") + 1] == (
         "[0:i:0x1e0]bwdif=deint=interlaced[pre];[pre][0:i:0x20]overlay=eof_action=pass[ov];"
         "[ov]scale=1024:576,setsar=1[v]")
 
@@ -280,5 +284,8 @@ def test_decode_mkv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(sources, "ffprobe_json", mkv_probe)
     s = MkvSource(str(tmp_path / "m.mkv"))
     s.sub = s.subs[0]
-    ffmpeg = decode_command(s, 42.125, "OUT").split("|")[2]
-    assert "[1:4]split[sa][sb]" in ffmpeg and "-ss 42.125 -i" in ffmpeg
+    ffmpeg = decode_command(s, 42.125, ["OUT"])[2]
+    graph = ffmpeg[ffmpeg.index("-filter_complex") + 1]
+    assert "[1:4]split[sa][sb]" in graph
+    i = ffmpeg.index("-ss")
+    assert ffmpeg[i:i + 4] == ["-ss", "42.125", "-i", s.path]

@@ -13,7 +13,7 @@ Come avviare il programma da un clone, dove stanno le cose nel codice, cosa cont
 1. Fai una volta l'installazione nativa (lo [script nativo](../README.it.md#script-nativo-da-una-copia-del-progetto) nel README), compresa la condivisione Samba. Installa anche tutto quello che serve a un clone:
    - i pacchetti di sistema (FFmpeg, libbluray, libdvdread, fuse3; Samba quando usi la condivisione Samba);
    - il decoder edge264 in `/opt/spinema/bin`;
-   - il punto di montaggio `/srv/bd3d`;
+   - la cartella semplice `/srv/spinema` (spinema monta `Disks` al suo interno a ogni avvio);
    - `user_allow_other` in `/etc/fuse.conf`.
 2. Avvia il programma dal clone invece che dalla copia installata:
 
@@ -23,10 +23,10 @@ Come avviare il programma da un clone, dove stanno le cose nel codice, cosa cont
    ```
 
    La prima riga del log dà la versione, per esempio `spinema v1.1.0-2-gabc1234`: due commit dopo la v1.1.0.
-3. Fermalo con **Ctrl+C**: smonta `/srv/bd3d` e cancella i suoi file temporanei.
+3. Fermalo con **Ctrl+C**: smonta `/srv/spinema/Disks` e cancella i suoi file temporanei.
 
 - **Una copia alla volta.** Quella installata e quella del clone usano lo stesso punto di montaggio. La seconda non parte, e un messaggio lo spiega.
-- **Dopo un crash, o un `kill -9`,** il punto di montaggio resta occupato: `fusermount3 -u /srv/bd3d`.
+- **Dopo un crash, o un `kill -9`,** il punto di montaggio resta occupato: `fusermount3 -u /srv/spinema/Disks`.
 - **VS Code:** apri la cartella e scegli `.venv` come interprete; lo crea `scripts/check.sh`. `.vscode/` spegne Pylint, perché i controlli sono quelli di `pyproject.toml`.
 
 ---
@@ -42,7 +42,7 @@ Come avviare il programma da un clone, dove stanno le cose nel codice, cosa cont
 | `src/bluray.py` | Un piccolo collegamento ctypes a libbluray: apre un disco, una ISO o una cartella, e ne legge i file decifrati. |
 | `src/osplatform.py` | Le chiamate che cambiano da un sistema operativo all'altro: lo stato del lettore, i lettori da guardare, il caricamento di una libreria condivisa, e la cartella temporanea e il percorso del log predefiniti. Oggi è implementato solo Linux. Si chiama osplatform, non platform, per non nascondere il modulo omonimo della libreria standard. |
 | `src/bdmv.py` | I file di navigazione del Blu-ray: playlist (MPLS), informazioni sulle clip (CLPI), il salto nel `.ssif`. |
-| `src/disc_reader.py` | Legge un titolo Blu-ray da un certo istante. 3D: il video per edge264 su stdout e l'audio in una FIFO. 2D: un solo flusso TS filtrato. Gira come processo a sé. |
+| `src/disc_reader.py` | Legge un titolo Blu-ray da un certo istante. 3D: il video per edge264 su stdout e l'audio a ffmpeg via TCP su loopback. 2D: un solo flusso TS filtrato. Gira come processo a sé. |
 | `src/ssif_demux.py` | Divide il flusso 3D `.ssif` in H.264 più MVC per edge264. |
 | `src/dvd.py` | libdvdread tramite ctypes, i file IFO, la scelta del titolo principale o degli episodi, e il salto preciso. |
 | `src/dvd_reader.py` | Legge un titolo DVD da un certo istante come flusso MPEG program per FFmpeg. Gira come processo a sé. |
@@ -58,7 +58,7 @@ Come avviare il programma da un clone, dove stanno le cose nel codice, cosa cont
 | `tools/bdprobe.c` | La prima sonda del progetto (fase 0 della roadmap): apre un disco con libbluray e salva l'inizio del flusso 3D. |
 | `src/mfusepy.py` | Adapter FUSE vendored usato solo dal percorso Samba/both; viene caricato condizionalmente e parla con il runtime libfuse3 di sistema. |
 
-Il percorso di un pezzo di file, dal player al disco: il player legge dei byte da un file in `/srv/bd3d` → `fuse_fs.py` passa la lettura a `VirtualFile.read()` (`library.py`), che trasforma il byte in un istante (il bitrate è costante) → se nessuna pipeline è a quell'istante, ne avvia una: il lettore della sorgente (`disc_reader.py`, `dvd_reader.py` o FFmpeg per gli MKV), poi il decoder (edge264 per il 3D, altrimenti FFmpeg), poi FFmpeg che codifica il `.ts` → i byte tornano al player. `--share dlna` usa lo stesso albero e la stessa `VirtualFile.read()` (`FileEntry` in `tree.py`), passando per la gestione del Range di `http_server.py` invece di una lettura FUSE; `dlna.py` aggiunge solo la descrizione UPnP e la scoperta.
+Il percorso di un pezzo di file, dal player al disco: il player legge dei byte da un file in `/srv/spinema/Disks` → `fuse_fs.py` passa la lettura a `VirtualFile.read()` (`library.py`), che trasforma il byte in un istante (il bitrate è costante) → se nessuna pipeline è a quell'istante, ne avvia una: il lettore della sorgente (`disc_reader.py`, `dvd_reader.py` o FFmpeg per gli MKV), poi il decoder (edge264 per il 3D, altrimenti FFmpeg), poi FFmpeg che codifica il `.ts` → i byte tornano al player. `--share dlna` usa lo stesso albero e la stessa `VirtualFile.read()` (`FileEntry` in `tree.py`), passando per la gestione del Range di `http_server.py` invece di una lettura FUSE; `dlna.py` aggiunge solo la descrizione UPnP e la scoperta.
 
 Il codice, i commenti e i messaggi del log sono in inglese. La documentazione è in due lingue: ogni file `.md` ha il suo gemello `.it.md`, da cambiare insieme.
 
@@ -77,7 +77,7 @@ scripts/check.sh --integration    # anche i test sul disco nel lettore
 - **shellcheck**: gli script in `scripts/` e `docker/`;
 - **gli unit test**.
 
-Al primo avvio crea `.venv` con gli strumenti alle versioni fissate in `requirements-dev.txt`. Le dipendenze del programma vengono dal sistema. GitHub esegue lo stesso script su Ubuntu 24.04, macOS e Windows (`.github/workflows/check.yml`): gli unit test, ruff e pyright restano verdi su tutti e tre mentre il refactor v1.3 rende portabile il nucleo; su macOS e Windows si saltano le parti ancora legate a Linux (FUSE, l'ioctl del lettore, `os.killpg`/`os.mkfifo`, il test di arresto con SIGTERM; `dpkg` per i controlli sulla versione Debian) e non girano i test di integrazione (lì niente disco, niente FUSE). Uno skip di pytest non nasconde il codice a pyright: una chiamata solo POSIX sta dietro `if sys.platform != "win32"` (o dopo `if sys.platform == "win32": raise ...`), che pyright legge come confine di piattaforma.
+Al primo avvio crea `.venv` con gli strumenti alle versioni fissate in `requirements-dev.txt`. Le dipendenze del programma vengono dal sistema. GitHub esegue lo stesso script su Ubuntu 24.04, macOS e Windows (`.github/workflows/check.yml`): gli unit test, ruff e pyright restano verdi su tutti e tre mentre il refactor v1.3 rende portabile il nucleo; su macOS e Windows si saltano le parti ancora legate a Linux (FUSE, l'ioctl del lettore, il test di arresto con SIGTERM; `dpkg` per i controlli sulla versione Debian) e non girano i test di integrazione (lì niente disco, niente FUSE). Uno skip di pytest non nasconde il codice a pyright: una chiamata solo POSIX sta dietro `if sys.platform != "win32"` (o dopo `if sys.platform == "win32": raise ...`), che pyright legge come confine di piattaforma.
 
 ### Unit test (`tests/`)
 
@@ -208,10 +208,23 @@ Con la decifratura di MakeMKV il comando comincia con `LIBAACS_PATH=libmmbd LIBB
 Un pezzo di file virtuale, come lo riceve un player:
 
 ```bash
-f="/srv/bd3d/Blu-ray 3D/ITA - Film - 3D SBS.ts"
+f="/srv/spinema/Disks/Blu-ray 3D/ITA - Film - 3D SBS.ts"
 dd if="$f" bs=188 skip=5000000 count=20000 status=none > /tmp/pezzo.ts
 ffprobe -hide_banner /tmp/pezzo.ts
 ```
+
+## Windows: il decoder edge264
+
+Il port per Windows (#10) decodifica il 3D con lo stesso edge264-mvc di Linux, compilato in cross da Linux al commit fissato in `scripts/install.sh`:
+
+```bash
+sudo apt install gcc-mingw-w64-x86-64-posix make git
+scripts/build-edge264-windows.sh            # dist/windows/: edge264mvc_test.exe, edge264mvc.2.dll, LICENSE_BSD.txt, edge264.commit
+```
+
+I due file vanno messi uno accanto all'altro e non serve altro: il runtime di MinGW e winpthreads sono collegati staticamente, importano solo `KERNEL32.dll` e `msvcrt.dll`. La licenza BSD di edge264 (`LICENSE_BSD.txt`) va distribuita insieme a loro. La build è portabile come quella del `.deb` (x86-64 di base, varianti più veloci scelte durante l'esecuzione).
+
+Per verificare una build, decodifica lo stesso input su Linux e su Windows e confronta i frame: `edge264mvc_test - -O < input.264` su entrambi, poi un MD5 per ogni frame Y4M. L'input è quello che `disc_reader.py` scrive per un titolo 3D (vedi *Smontare una pipeline*). Verificato per #105 su una VM Windows 11 con 2 core: ogni frame identico a Linux (1243 frame di un Blu-ray 3D), circa 4,3 volte il tempo reale (Linux su 2 core dell'host: circa 6 volte).
 
 ---
 

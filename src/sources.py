@@ -25,8 +25,8 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -37,14 +37,14 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol, Self, cast, override
+from typing import Any, ClassVar, Protocol, Self, cast, override
 
 import bluray
 import dvd
 import lookup
 from bdmv import Clip, PlayItem, m2ts_seek, parse_clpi, parse_mpls, ssif_seek
 from langs import lang as to_lang
-from osplatform import has_library
+from osplatform import has_library, load_makemkv
 
 log = logging.getLogger("bd3d_fs")
 
@@ -94,7 +94,9 @@ class Source(ABC):
     input_format: str = "mpegts"    # two_d: format of video_command's output
     video_map: str = "0:i:0x1011"   # two_d: the video stream in it
     # two_d: how much of that stream ffmpeg reads to find its tracks before it starts
-    probe_args: str = "-analyzeduration 2000000 -probesize 10000000"
+    probe_args: ClassVar[list[str]] = ["-analyzeduration", "2000000", "-probesize", "10000000"]
+    env: dict[str, str] = {}        # noqa: RUF012 — extra variables video_command() needs;
+    # never mutated in place, only replaced wholesale (BlurayDiscSource.__init__)
     pre_filter: str = ""            # video filters before the subtitle overlay (deinterlace)
     post_filter: str = ""           # ... and after it (scale)
     sub: SubtitleTrack | None = None  # the track drawn into this file, if any
@@ -124,10 +126,10 @@ class Source(ABC):
         """The subtitle stream as an ffmpeg stream specifier on that input."""
         return f"{input_index}:i:{self.drawn_sub().stream:#x}"
 
-    def sub_decoder_args(self) -> str:
-        """ffmpeg input options for the subtitle decoder."""
-        args = f"-canvas_size {self.sub_canvas}" if self.sub_canvas else ""
-        return args + (" -forced_subs_only 1" if self.forced_only else "")
+    def sub_decoder_args(self) -> list[str]:
+        """ffmpeg input argv for the subtitle decoder."""
+        args = ["-canvas_size", self.sub_canvas] if self.sub_canvas else []
+        return args + (["-forced_subs_only", "1"] if self.forced_only else [])
 
     def variants(self) -> Sequence[Self]:
         """One source per audio language: players such as the VITURE 3D Player
@@ -140,16 +142,16 @@ class Source(ABC):
         """Start time of the keyframe the video will actually start from."""
 
     @abstractmethod
-    def video_command(self, start: float) -> str:
-        """Shell command writing Annex B H.264 + MVC to stdout, from keyframe `start`."""
+    def video_command(self, start: float) -> list[str]:
+        """argv writing Annex B H.264 + MVC to stdout, from keyframe `start`."""
 
     @abstractmethod
-    def audio_input(self, start: float) -> str:
-        """ffmpeg input options adding the audio as input #1, starting at `start`."""
+    def audio_input(self, start: float) -> list[str]:
+        """ffmpeg input argv adding the audio as input #1, starting at `start`."""
 
     @abstractmethod
-    def audio_map(self, input_index: int = 1) -> str:
-        """ffmpeg -map option(s) selecting the audio tracks from that input ('' = no audio)."""
+    def audio_map(self, input_index: int = 1) -> list[str]:
+        """ffmpeg -map argv selecting the audio tracks from that input ([] = no audio)."""
 
 
 def _lang_of(stream: dict[str, Any]) -> str:
@@ -225,28 +227,31 @@ class MkvSource(Source):
         return seconds
 
     @override
-    def video_command(self, start: float) -> str:
+    def video_command(self, start: float) -> list[str]:
         # For DTS-seeking formats with B-frames, ffmpeg moves the seek point back
         # by 3/23 s. Asking for exactly keyframe K would land on the PREVIOUS
         # keyframe (~1 s earlier) and the picture would lag the audio by that
         # much. Asking for K+0.2 lands on K; stream copy keeps packets from the
         # keyframe on, so the first frame is still K.
-        ss = f"-ss {start + 0.2:.3f} " if start > 0 else ""
-        return (f"ffmpeg -nostdin -v error {ss}-i {shlex.quote(self.path)} -map 0:v:0 "
-                f"-c copy -bsf:v h264_mp4toannexb -f h264 -")
+        ss = ["-ss", f"{start + 0.2:.3f}"] if start > 0 else []
+        return ["ffmpeg", "-nostdin", "-v", "error", *ss, "-i", self.path, "-map", "0:v:0",
+                "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "h264", "-"]
 
     @override
-    def audio_input(self, start: float) -> str:
-        ss = f"-ss {start:.3f} " if start > 0 else ""
-        return f"{ss}-i {shlex.quote(self.path)}"
+    def audio_input(self, start: float) -> list[str]:
+        ss = ["-ss", f"{start:.3f}"] if start > 0 else []
+        return [*ss, "-i", self.path]
 
     @override
     def sub_ref(self, input_index: int) -> str:
         return f"{input_index}:{self.drawn_sub().stream}"
 
     @override
-    def audio_map(self, input_index: int = 1) -> str:
-        return " ".join(f"-map {input_index}:{i}" for i in self.audio_indexes)
+    def audio_map(self, input_index: int = 1) -> list[str]:
+        out: list[str] = []
+        for i in self.audio_indexes:
+            out += ["-map", f"{input_index}:{i}"]
+        return out
 
     @override
     def variants(self) -> Sequence[Self]:
@@ -307,8 +312,21 @@ def _run_dir() -> str:
 
 
 def _temp_file(name: str) -> str:
-    """A path for a file of this run (audio FIFOs, IFO copies)."""
+    """A path for a file of this run (IFO copies)."""
     return os.path.join(_run_dir(), f"{next(_temp_ids)}-{name}")
+
+
+# 3D audio over loopback TCP (#192): how long ffmpeg waits for disc_reader to connect
+AUDIO_LISTEN_TIMEOUT_MS = 60_000
+
+
+def _free_port() -> int:
+    """A loopback port nobody uses now, for ffmpeg to listen on. Closed again at
+    once: the short gap before ffmpeg binds it is accepted (loopback only, #192)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port: int = s.getsockname()[1]
+        return port
 
 
 def _decrypt_backends() -> list[dict[str, str]]:
@@ -320,12 +338,28 @@ def _decrypt_backends() -> list[dict[str, str]]:
     return envs
 
 
+def _by_makemkv(info: bluray.DiscInfo, env: dict[str, str]) -> tuple[bool, bool]:
+    """(AACS, BD+) decrypted by MakeMKV's libmmbd. What libbluray says it used
+    wins: it falls back to libmmbd by itself when libaacs has no key, and then
+    hands it BD+ too (bdplus.c). The attempt's environment only when unknown."""
+    def by(library: str, variable: str) -> bool:
+        # a name or path the user gave counts too ("libmmbd.so.0", "...\\libmmbd64")
+        return "mmbd" in (library or env.get(variable, ""))
+    return (by(info.aacs_library, "LIBAACS_PATH"),
+            "BD+" in info.protection and by(info.bdplus_library, "LIBBDPLUS_PATH"))
+
+
 def _decrypted_with(info: bluray.DiscInfo, env: dict[str, str]) -> str:
     """For the log and problem reports: which protection, opened by which backend."""
     if not info.protection:
         return "not encrypted"
-    if env.get("LIBAACS_PATH") == "libmmbd":
+    aacs_mmbd, bdplus_mmbd = _by_makemkv(info, env)
+    if aacs_mmbd:
         backend = "MakeMKV (libmmbd)"
+        if "BD+" in info.protection and not bdplus_mmbd:
+            backend += " + libbdplus"
+    elif bdplus_mmbd:
+        backend = "libaacs + MakeMKV (libmmbd)"
     elif "BD+" in info.protection:
         backend = "libaacs + libbdplus"
     else:
@@ -360,11 +394,14 @@ def _open_disc(path: str) -> tuple[bluray.Disc, bluray.DiscInfo, dict[str, str]]
     for env in _decrypt_backends():
         saved = {k: os.environ.get(k) for k in ("LIBAACS_PATH", "LIBBDPLUS_PATH")}
         os.environ.update(env)
+        if env.get("LIBAACS_PATH") == "libmmbd":
+            load_makemkv()
         try:
             disc = bluray.Disc(path)
             info = disc.info()
-            bdplus_by_mmbd = ("BD+" in info.protection
-                              and os.environ.get("LIBBDPLUS_PATH") == "libmmbd")
+            # the environment in force, a LIBBDPLUS_PATH the user exported included
+            in_force = {k: v for k in saved if (v := os.environ.get(k))}
+            bdplus_by_mmbd = _by_makemkv(info, in_force)[1]
             if info.decrypted and not bdplus_by_mmbd:
                 if "BD+" in info.protection and not bluray.bdplus_table_found(path):
                     disc.close()
@@ -372,7 +409,7 @@ def _open_disc(path: str) -> tuple[bluray.Disc, bluray.DiscInfo, dict[str, str]]
                         "BD+ disc: no conversion table for it in "
                         "~/.config/bdplus/convtab (libbdplus), see "
                         "Decryption in the README")
-                log.info("%s: %s", path, _decrypted_with(info, env))
+                log.info("%s: %s", path, _decrypted_with(info, in_force))
                 return disc, info, env
             last = info
             disc.close()
@@ -768,11 +805,12 @@ class DiscSource(Source):
         return out
 
     @override
-    def audio_map(self, input_index: int = 1) -> str:
+    def audio_map(self, input_index: int = 1) -> list[str]:
         # the disc's PMT carries no language: take it from the playlist's STN table
-        return " ".join(f"-map {input_index}:i:{p:#x} -metadata:s:a:{n} language={lang}"
-                        for n, (p, lang) in enumerate(zip(self.audio_pids, self.audio_langs,
-                                                          strict=True)))
+        out: list[str] = []
+        for n, (p, lang) in enumerate(zip(self.audio_pids, self.audio_langs, strict=True)):
+            out += ["-map", f"{input_index}:i:{p:#x}", f"-metadata:s:a:{n}", f"language={lang}"]
+        return out
 
 
 class BlurayDiscSource(DiscSource):
@@ -803,7 +841,7 @@ class BlurayDiscSource(DiscSource):
             titles = sorted(disc.titles(), key=lambda t: t.playlist)
             # Read the first clip of each playlist to deduplicate alternate-audio/subtitle
             # variants: same opening clip = same episode (variants may append short clips
-            # for language cards or warnings; keep the lowest playlist number per episode).
+            # for language cards or warnings; one title per episode is kept, see the dedup below).
             # The full PlayItem list is kept too, to find a play-all playlist afterwards.
             langs: dict[str, frozenset[str]] = {}
             items_by_playlist: dict[str, list[PlayItem]] = {}
@@ -858,15 +896,20 @@ class BlurayDiscSource(DiscSource):
             play_alls = [t for t in titles if t.playlist in play_all_ids]
             candidates = [t for t in titles if t.playlist not in play_all_ids] or titles
 
-            # Deduplicate: keep only the first title (lowest playlist number) per opening
-            # clip. This removes alternate-audio/subtitle variants.
-            seen_sigs: set[str] = set()
-            unique: list[bluray.Title] = []
+            # Deduplicate: keep only one title per opening clip, removing
+            # alternate-audio/subtitle variants. On a 3D disc the 3D variant of an
+            # episode (#189), else the lowest playlist number.
+            best_by_sig: dict[str, bluray.Title] = {}
+            sig_order: list[str] = []
             for t in candidates:
                 sig = sigs[t.playlist]
-                if sig not in seen_sigs:
-                    seen_sigs.add(sig)
-                    unique.append(t)
+                if sig not in best_by_sig:
+                    sig_order.append(sig)
+                    best_by_sig[sig] = t
+                elif info.has_3d and not _is_3d(items_by_playlist.get(best_by_sig[sig].playlist)) \
+                        and _is_3d(items_by_playlist.get(t.playlist)):
+                    best_by_sig[sig] = t
+            unique = [best_by_sig[sig] for sig in sig_order]
 
             if len(unique) >= 2:
                 by_dur = sorted(unique, key=lambda t: -t.duration)
@@ -963,7 +1006,7 @@ class BlurayDiscSource(DiscSource):
         self.audio_langs = [a.lang for a in chosen_audio]
         self.audio_desc = ", ".join(f"{a.pid:#x} {a.lang} {a.codec}"
                                     for a in chosen_audio) or "none"
-        self._fifo: str | None = None
+        self._audio_port: int | None = None
 
     @override
     def keyframe_at_or_before(self, seconds: float) -> float:
@@ -977,32 +1020,37 @@ class BlurayDiscSource(DiscSource):
         return self.starts[i] + max(0.0, sp.time)
 
     @override
-    def video_command(self, start: float) -> str:
-        env = " ".join(f"{k}={v}" for k, v in self.env.items())
+    def video_command(self, start: float) -> list[str]:
         # the subtitle stream travels like an audio one (same filtering and start)
-        pids = " ".join(f"--audio-pid {p:#x}" for p in
-                        self.audio_pids + ([self.sub.stream] if self.sub is not None else []))
+        pids: list[str] = []
+        for p in self.audio_pids + ([self.sub.stream] if self.sub is not None else []):
+            pids += ["--audio-pid", f"{p:#x}"]
         # +2 ms: `start` is an EP_map time (truncated), make sure the same entry is found
-        cmd = (f"{env} {shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'disc_reader.py'))} "
-               f"{shlex.quote(self.path)} --playlist {self.playlist} --start {start + 0.002:.3f} "
-               f"{pids}")
+        cmd = [sys.executable, str(HERE / "disc_reader.py"), self.path,
+               "--playlist", self.playlist, "--start", f"{start + 0.002:.3f}", *pids]
         if self.two_d:
-            return f"{cmd} --mode 2d".strip()
-        # 3D: one FIFO per pipeline start, disc_reader writes the audio TS into it
-        if self._fifo and os.path.exists(self._fifo):
-            os.unlink(self._fifo)
-        if sys.platform == "win32":
-            raise NotImplementedError("3D audio goes through a FIFO (os.mkfifo): POSIX only "
-                                      "until #103")
-        self._fifo = _temp_file("audio.ts")
-        os.mkfifo(self._fifo)
-        return f"{cmd} --audio-out {shlex.quote(self._fifo)}".strip()
+            return [*cmd, "--mode", "2d"]
+        # 3D: one port per pipeline start; ffmpeg listens on it, disc_reader connects
+        # and sends the audio TS (loopback TCP, the same on every platform, #192)
+        self._audio_port = _free_port()
+        return [*cmd, "--audio-port", str(self._audio_port)]
 
     @override
-    def audio_input(self, start: float) -> str:
-        if self._fifo is None:
+    def audio_input(self, start: float) -> list[str]:
+        if self._audio_port is None:
             raise ValueError("audio_input() before video_command()")
-        return f"-f mpegts -analyzeduration 1000000 -probesize 5000000 -i {shlex.quote(self._fifo)}"
+        # listen_timeout: disc_reader never connects (it gives up on its own side
+        # after disc_reader.AUDIO_CONNECT_TIMEOUT, the same 60 s)
+        url = (f"tcp://127.0.0.1:{self._audio_port}"
+               f"?listen=1&listen_timeout={AUDIO_LISTEN_TIMEOUT_MS}")
+        return ["-f", "mpegts", "-analyzeduration", "1000000", "-probesize", "5000000",
+                "-i", url]
+
+
+class DvdError(OSError):
+    """A disc the DVD reader recognised (opened, VIDEO_TS.IFO read) that then fails
+    for its own reason (CSS without libdvdcss, no playable title...): open_disc()
+    shows this error, not the Blu-ray one it got first (#188)."""
 
 
 class DvdSource(DiscSource):
@@ -1015,7 +1063,7 @@ class DvdSource(DiscSource):
     # a program stream announces no tracks: ffmpeg knows one when it meets a
     # packet of it. Titles often open with seconds of logos and warnings without
     # audio, so it looks further (the disc is read far faster than it plays)
-    probe_args = "-analyzeduration 8000000 -probesize 20000000"
+    probe_args: ClassVar[list[str]] = ["-analyzeduration", "8000000", "-probesize", "20000000"]
     sub_canvas = ""                 # DVD: the picture in the same stream gives it
 
     @classmethod
@@ -1023,18 +1071,32 @@ class DvdSource(DiscSource):
                lookup_enabled: bool = False) -> list["DvdSource"]:
         """The movie, or one source per episode (named like Blu-ray episodes, #127).
         `lookup_enabled` (--lookup, #84, #69): as on Blu-ray, TheDiscDB's roles and
-        titles, by the disc's title numbers; off by default, no network touched."""
+        titles, by the disc's title numbers; off by default, no network touched.
+        Once the disc is recognised as a DVD, its errors are a DvdError (#188)."""
+        with dvd.Dvd(path) as disc:
+            parsed = dvd.all_titles(disc)
+        try:
+            return cls._sources(path, parsed, audio_langs, lookup_enabled)
+        except DvdError:
+            raise
+        except OSError as e:
+            # errno, message and file name kept: the log still names the file
+            args = e.args if e.errno is None else (e.errno, e.strerror, e.filename, None,
+                                                   e.filename2)
+            raise DvdError(*args) from e
+
+    @classmethod
+    def _sources(cls, path: str, parsed: list[dvd.DvdTitle], audio_langs: list[str] | None,
+                 lookup_enabled: bool) -> list["DvdSource"]:
         def key(t: dvd.DvdTitle) -> str:
             return f"{t.number:02d}"
 
-        with dvd.Dvd(path) as disc:
-            parsed = dvd.all_titles(disc)
-            chosen = dvd.choose_titles(parsed)
-            # a title with no cell (a copy-protection dummy) cannot play, whatever its role
-            playable = [t for t in parsed if t.cells]
-            roles: dict[str, lookup.Role] = {}
-            if lookup_enabled and len(playable) >= 2:
-                roles = _online_roles(path, _dvd_content_hash(path), [key(t) for t in playable])
+        chosen = dvd.choose_titles(parsed)
+        # a title with no cell (a copy-protection dummy) cannot play, whatever its role
+        playable = [t for t in parsed if t.cells]
+        roles: dict[str, lookup.Role] = {}
+        if lookup_enabled and len(playable) >= 2:
+            roles = _online_roles(path, _dvd_content_hash(path), [key(t) for t in playable])
         choice = _choice_by_role(
             playable, roles, key=key, sig=lambda t: (t.vts, t.cells[0].first if t.cells else 0),
             is_3d=lambda _: False, has_3d=False)
@@ -1115,14 +1177,14 @@ class DvdSource(DiscSource):
                                     for a in chosen) or "none"
 
     @override
-    def sub_decoder_args(self) -> str:
+    def sub_decoder_args(self) -> list[str]:
         # the subpicture colours come from the disc's IFO. ffmpeg refuses -palette as
         # an input option (the dvdsub encoder has an option of the same name), but
         # takes -ifo_palette: a copy of the title's IFO in a temporary folder
         if self._ifo_copy is None:
             self._ifo_copy = _temp_file("VTS.IFO")
             Path(self._ifo_copy).write_bytes(self._ifo_for_palette())
-        return f"-ifo_palette {shlex.quote(self._ifo_copy)} " + super().sub_decoder_args()
+        return ["-ifo_palette", self._ifo_copy, *super().sub_decoder_args()]
 
     def _ifo_for_palette(self) -> bytes:
         """The VTS IFO with the main title's palette in its first PGC, where
@@ -1139,20 +1201,21 @@ class DvdSource(DiscSource):
             return dvd.seek(self._vobs, self.title, seconds).time
 
     @override
-    def video_command(self, start: float) -> str:
-        audio = " ".join(f"--audio {p:#x}" for p in self.audio_pids)
+    def video_command(self, start: float) -> list[str]:
+        audio: list[str] = []
+        for p in self.audio_pids:
+            audio += ["--audio", f"{p:#x}"]
         # +2 ms: `start` is a VOBU time, make sure the same VOBU is found
-        return (f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'dvd_reader.py'))} "
-                f"{shlex.quote(self.path)} --title {self.title.number} "
-                f"--start {start + 0.002:.3f} {audio}"
-                + (f" --sub {self.sub.stream:#x}" if self.sub else ""))
+        cmd = [sys.executable, str(HERE / "dvd_reader.py"), self.path,
+               "--title", str(self.title.number), "--start", f"{start + 0.002:.3f}", *audio]
+        return cmd + (["--sub", f"{self.sub.stream:#x}"] if self.sub else [])
 
     @override
-    def audio_input(self, start: float) -> str:
-        return ""
+    def audio_input(self, start: float) -> list[str]:
+        return []
 
     @override
-    def audio_map(self, input_index: int = 0) -> str:
+    def audio_map(self, input_index: int = 0) -> list[str]:
         return super().audio_map(input_index)
 
 
@@ -1165,6 +1228,8 @@ def open_disc(path: str, audio_langs: list[str] | None = None, *,
     except OSError as bd_error:
         try:
             return list(DvdSource.all_on(path, audio_langs, lookup_enabled=lookup_enabled))
+        except DvdError:
+            raise                   # a DVD after all: its own error (#188)
         except OSError:
             raise bd_error from None
 

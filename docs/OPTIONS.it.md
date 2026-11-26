@@ -20,12 +20,12 @@ Le impostazioni predefinite funzionano: questa pagina serve solo se vuoi cambiar
 | [Profondità dei sottotitoli 3D](#sottotitoli) (pixel) | `SUB_DEPTH` | `--sub-depth 8` | `8` |
 | [Copie a bitrate ridotto in `Light/`](#rete-e-qualità) | `LIGHT=on\|off` | `--light` / `--no-light` | attive |
 | [Copie a bitrate alto in `Heavy/`](#rete-e-qualità) | `HEAVY=on\|off` | `--heavy` / `--no-heavy` | disattive |
-| [Animazione dopo un salto](#animazione-di-caricamento-dopo-un-salto) | `LOADER` | `--loader retrowave\|simple\|none\|video.mp4`, `--loader-3d video.mp4` | `retrowave` |
+| [Animazione di caricamento](#animazione-di-caricamento-dopo-un-salto-o-allinizio) | `LOADER` | `--loader retrowave\|simple\|none\|video.mp4`, `--loader-3d video.mp4` | `retrowave` |
 | [Encoder video](#encoder-video) | `ENCODER` | `--encoder auto\|nvenc\|vaapi\|x264` | `auto` (NVENC, poi VAAPI, poi x264) |
 | [Condivisione via Samba, DLNA, o entrambe](#dlnaupnp-invece-di-samba) | `SHARE` | `--share samba\|dlna\|both` | `samba` |
 | [Porta DLNA/HTTP](#dlnaupnp-invece-di-samba) | `HTTP_PORT` | `--http-port` | `8201` |
 | [Titoli episodi online](#ricerca-online-degli-episodi) | `LOOKUP=on\|off` | `--lookup` | spento |
-| Punto di montaggio | — | `--mount` | `/srv/bd3d` |
+| Punto di montaggio | — | `--mount` | `/srv/spinema/Disks`; Windows: `C:\Program Files\Spinema\share\Disks` |
 | [File di log del programma](#log) | — | `--log percorso` o `none` | `~/.local/state/spinema/spinema.log` |
 | [Log della pipeline](#log) | — | `--log-file` | `/tmp/bd3d-pipeline.log` |
 | [Log dei salti](#log) | — | `--debug` | spento |
@@ -86,7 +86,7 @@ spinema --lookup /dev/sr0
 
 ## DLNA/UPnP invece di Samba
 
-Per default i file sono montati solo per Samba, la cartella `[Disks]` (`--share samba`). `--share dlna` annuncia gli stessi file via DLNA/UPnP invece che via SMB, per i player che esplorano un media server invece di aprire una cartella di rete (smart TV, Kodi, Moon VR…); in questa modalità non servono né FUSE né Samba. `--share both` fa entrambe le cose insieme, per esempio per servire una TV via DLNA e un telefono via SMB dallo stesso programma.
+Per default i file sono montati solo per Samba, la cartella `[Spinema]` (`--share samba`). `--share dlna` annuncia gli stessi file via DLNA/UPnP invece che via SMB, per i player che esplorano un media server invece di aprire una cartella di rete (smart TV, Kodi, Moon VR…); in questa modalità non servono né FUSE né Samba. `--share both` fa entrambe le cose insieme, per esempio per servire una TV via DLNA e un telefono via SMB dallo stesso programma.
 
 ```console
 spinema --share dlna --audio-lang ita,eng /dev/sr0
@@ -143,7 +143,7 @@ Se la riproduzione **si ferma ogni pochi secondi**, il Wi-Fi non regge quel bitr
   ```
   Se invece dice "only 0.5s of movie is ready ahead: the disc or the decoding cannot keep up", `Light/` non aiuta: guarda il disco (graffi, impronte) e la CPU.
 
-## Animazione di caricamento dopo un salto
+## Animazione di caricamento dopo un salto o all'inizio
 
 Dopo un salto con la barra il film ha bisogno di qualche secondo (il lettore si sposta, poi parte la decodifica). Nel frattempo il player mostra l'ultima immagine, ferma, e il suo contatore non avanza: sembra bloccato, ma poi il film riparte **esattamente dove hai saltato**.
 
@@ -151,7 +151,7 @@ Per questo il file, di default, contiene un'animazione di caricamento, in loop, 
 - vedi subito che sta caricando;
 - però durante l'animazione il contatore del player continua ad avanzare, e il film riparte **altrettanti secondi dopo** il punto in cui hai saltato: meno di un secondo su un DVD, 2-5 s su un Blu-ray dal lettore. Le due cose non possono stare insieme: ogni secondo del file è un secondo del film, e i secondi occupati dall'animazione non si possono riusare.
 
-Non compare quando il player è in pausa (aspetta il fotogramma del film) né alla prima apertura di un file.
+Compare anche quando apri un file e il suo inizio non è ancora pronto, quindi può coprire i primi secondi del film. Non compare quando il player è in pausa (aspetta il fotogramma del film).
 
 - `--loader simple` (Docker: `LOADER=simple`): una più sobria, un disco e un arco che gira, in 2D.
 - `--loader none` (Docker: `LOADER=none`): niente animazione. Il player aspetta sull'immagine ferma e il film riparte esattamente dove hai saltato.

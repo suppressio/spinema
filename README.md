@@ -34,7 +34,7 @@ The PC reads the disc and decodes the MVC **while you watch**, and serves the re
    "ITA - movie - 3D SBS.ts"  a virtual file in an SMB share (it does not exist on disk)
         │   Wi-Fi
         ▼
-   Glasses / headset: player ► network share ► Disks ► movie   → 3D, pause, seek
+   Glasses / headset: player ► network share ► Spinema ► Disks ► movie   → 3D, pause, seek
 ```
 
 - **Insert the disc, the movie appears.** About 15 seconds after closing the tray the file shows up in the share, named after the disc; eject the disc and it goes away.
@@ -60,7 +60,7 @@ All the procedures described here are a balanced compromise between "manual" and
 #### Decryption: bring your own keys
 Commercial Blu-rays are encrypted (AACS, some also BD+). The project **does not provide or download any key**; it uses what you have, in this order:
 1. **libaacs + `KEYDB.cfg`**: fully open source. Put a key database in `~/.config/aacs/KEYDB.cfg` (for Docker: the folder you set as `AACS_DIR`).
-2. **MakeMKV**, if installed and registered: its `libmmbd` library decrypts AACS in place of libaacs.
+2. **MakeMKV**, if installed and active: its `libmmbd` library decrypts AACS in place of libaacs. After installing it, open MakeMKV once and either start its 30-day evaluation or enter a registration key (*Help → Register*; the free beta key is on the [MakeMKV forum](https://forum.makemkv.com/forum/viewtopic.php?t=1053)): until then `libmmbd` decrypts nothing, even though MakeMKV is installed.
 3. Unencrypted **ISO / BDMV folders** need no keys.
 
 **BD+ discs** (a minority, released up to about 2017) are decrypted by **libaacs + libbdplus**, open source. libbdplus needs two things you provide, in `~/.config/bdplus/` (for Docker: the folder you set as `BDPLUS_DIR`): `vm0/`, its configuration, and `convtab/`, the precomputed conversion tables of the discs (a community archive covers practically every BD+ disc). Where to find them: the [ArchWiki Blu-ray page](https://wiki.archlinux.org/title/Blu-ray) and the thread it links ([archived copy](https://web.archive.org/web/20260910011411/https://forum.doom9.org/showthread.php?t=176924)). A BD+ disc without its table is skipped, and the log says so. MakeMKV is not used for BD+: it opens these discs, but after every jump in the movie the picture breaks up.
@@ -104,7 +104,7 @@ When a disc goes in, its files appear; every `pipeline from` line is the player 
 11:23:59 spinema v1.0.0
 11:24:00 video encoder: nvenc
 11:24:00 watching /dev/sr0: insert a disc
-11:24:00 mounted on /srv/bd3d — Ctrl+C to unmount
+11:24:00 mounted on /srv/spinema/Disks — Ctrl+C to unmount
 11:24:00 /dev/sr0: disc inserted, opening it
 11:24:00 + Blu-ray 3D/ITA - Tron - Legacy 3D - 3D SBS.ts  (125 min, 24.0 Mbit/s, audio 0x1102 ita dts, forced subtitles ita)
 11:24:00 + Blu-ray 3D/ITAsubITA - Tron - Legacy 3D - 3D SBS.ts  (125 min, 24.0 Mbit/s, audio 0x1102 ita dts, subtitles ita)
@@ -119,7 +119,7 @@ Stop it with `Ctrl+C`. Updating and uninstalling: [below](#updating-and-uninstal
 
 #### Native script (from a clone)
 
-For a working clone, or to follow the development version. [`scripts/install.sh`](scripts/install.sh), run as your normal user, installs the packages, compiles edge264, installs the command and adds the read-only guest share `[Disks]` to Samba (Debian/Ubuntu):
+For a working clone, or to follow the development version. [`scripts/install.sh`](scripts/install.sh), run as your normal user, installs the packages, compiles edge264, installs the command and adds the read-only guest share `[Spinema]` to Samba (Debian/Ubuntu):
 ```console
 git clone https://github.com/suppressio/spinema.git
 cd spinema
@@ -186,14 +186,16 @@ If the PC already runs Samba, the container cannot take port 445. Players on pho
 
 **Updating**, when a new version is out (see [Releases](https://github.com/suppressio/spinema/releases)); `spinema --version` tells which one you have:
 - release package: download the new `.deb` and install it with `sudo apt install ./spinema_<version>_amd64.deb`;
-- native: `./scripts/update.sh` in the project folder. It downloads the latest version and copies the program to `/opt/spinema`; it runs the whole `install.sh` again only when needed (edge264 changed, or nothing is installed). It ends with "Updated from vX to vY" and the list of changes. If the program is running, stop it and start it again.
+- native: `./scripts/update.sh` in the project folder. It downloads the latest version and copies the program to `/opt/spinema`; it runs the whole `install.sh` again only when needed (edge264 changed, nothing is installed, or the Samba share is still on `/srv/bd3d`). It ends with "Updated from vX to vY" and the list of changes. If the program is running, stop it and start it again.
 - Docker: `git pull && docker compose up -d --build`.
 
-**Coming from `bluray3d-xr`**: Spinema is the new name of the project (the command, the package and `/opt/bluray3d-xr` were called `bluray3d-xr`). The new `.deb` replaces the old package and keeps its group; for the native install run `./scripts/update.sh` twice (the first run is still the old script, which updates in place; the second moves the install and its Samba share over); Docker rebuilds the image under the new name (after `docker compose down` in the old folder if you cloned again; `docker image rm bluray3d-xr:local` frees the old image). Stop the program before updating. Then start the new `spinema` command. With the `.deb`, if you later purge the old package (`sudo apt purge bluray3d-xr`, it stays listed as `rc`), run `sudo dpkg-reconfigure spinema` afterwards: the old package's purge removes `/srv/bd3d`. Old logs stay in `~/.local/state/bluray3d-xr/`. Two things to know: scripts, units or aliases that call `bluray3d-xr` must be changed to `spinema`, and DLNA players list it as a new server (the old entry is dead).
+**The share moved to `\\PC\Spinema\Disks`** (it was `\\PC\Disks`): point your player there once you update. `update.sh`, the `.deb`'s `postinst` and the Docker image all move the Samba share and the mount point for you, dropping the old `/srv/bd3d`. With the native install, coming from v1.6.0 or earlier, run `./scripts/update.sh` **twice**: the first run is still the old script, which only updates the program (`spinema` then stops with "cannot create the mount point /srv/spinema/Disks"); the second moves the share. From then on `update.sh` runs its own new version by itself. If you start `spinema` with `--mount /srv/bd3d` (in a script or a unit), drop that option: the default `/srv/spinema/Disks` is the folder the share now shows.
+
+**Coming from `bluray3d-xr`**: Spinema is the new name of the project (the command, the package and `/opt/bluray3d-xr` were called `bluray3d-xr`). The new `.deb` replaces the old package and keeps its group; for the native install run `./scripts/update.sh` twice (the first run is still the old script, which updates in place; the second moves the install and its Samba share over); Docker rebuilds the image under the new name (after `docker compose down` in the old folder if you cloned again; `docker image rm bluray3d-xr:local` frees the old image). Stop the program before updating. Then start the new `spinema` command. Old logs stay in `~/.local/state/bluray3d-xr/`. Two things to know: scripts, units or aliases that call `bluray3d-xr` must be changed to `spinema`, and DLNA players list it as a new server (the old entry is dead).
 
 **Uninstalling**:
-- release package: `sudo apt remove spinema` removes the share and `/srv/bd3d`; `sudo apt purge spinema` also removes the `spinema` group. The `user_allow_other` line stays in `/etc/fuse.conf`.
-- native: `./scripts/uninstall.sh`. It unmounts `/srv/bd3d` and removes it, removes the `[Disks]` share from `smb.conf` (only the block it added: your own shares stay), `/opt/spinema` and the `spinema` command. The apt packages (FFmpeg, Samba, libbluray...) and the `user_allow_other` line in `/etc/fuse.conf` stay, since other software may use them: remove them with apt if nothing needs them.
+- release package: `sudo apt remove spinema` removes the share and `/srv/spinema`; `sudo apt purge spinema` also removes the `spinema` group. The `user_allow_other` line stays in `/etc/fuse.conf`.
+- native: `./scripts/uninstall.sh`. It unmounts `/srv/spinema/Disks` and removes it with `/srv/spinema`, removes the `[Spinema]` share from `smb.conf` (only the block it added: your own shares stay), `/opt/spinema` and the `spinema` command. The apt packages (FFmpeg, Samba, libbluray...) and the `user_allow_other` line in `/etc/fuse.conf` stay, since other software may use them: remove them with apt if nothing needs them.
 - Docker: `docker compose down --rmi all` stops the container and deletes its image.
 
 Then delete the project folder.
@@ -203,7 +205,7 @@ Then delete the project folder.
 ## Step 2 — Watch it on the glasses
 
 - [ ] Insert the disc in the PC and wait about 15 seconds.
-- [ ] On the glasses, headset or TV, open the network share of the PC: many players find it by themselves under "local network", otherwise add its IP address (`hostname -I` on the PC tells you), guest / anonymous access.
+- [ ] On the glasses, headset or TV, open the PC's network share, **Spinema**: many players find it by themselves under "local network", otherwise add its IP address (`hostname -I` on the PC tells you), guest / anonymous access.
 - [ ] Open the **Disks** folder (go back and in again if it looks empty). 3D discs are in `Blu-ray 3D/` as `ITA - <movie> - 3D SBS.ts`, normal ones in `Blu-ray/` as `ITA - <movie>.ts`: one file per audio language, plus versions with subtitles (`ITAsubENG - ...`: Italian audio, English subtitles). `Light/` has the same movies at a lower bitrate, for weak Wi-Fi; with `--heavy` (`HEAVY=on`), `Heavy/` has the 2D and 3D ones (not DVDs) at a higher bitrate, for a wired network (not verified on real discs yet, see [Network and quality](docs/OPTIONS.md#network-and-quality)).
 
 ```

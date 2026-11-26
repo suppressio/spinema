@@ -1,6 +1,5 @@
 """The stand-in pictures (loading animation, black tail): which part of the
 picture goes where, for 2D and 3D movies and 2D or side-by-side animations."""
-import shlex
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +13,8 @@ from test_library import FakeSource
 from tree import Tree
 
 
-def graph_of(cmd: str) -> str:
-    args = shlex.split(cmd)
-    return args[args.index("-filter_complex") + 1]
+def graph_of(cmd: list[str]) -> str:
+    return cmd[cmd.index("-filter_complex") + 1]
 
 
 def movie(tmp_path: Path, two_d: bool, encoder: str = "x264") -> VirtualFile:
@@ -38,7 +36,7 @@ def movie(tmp_path: Path, two_d: bool, encoder: str = "x264") -> VirtualFile:
 ])
 def test_filler_picture(tmp_path: Path, two_d: bool, sbs: bool, expected: str) -> None:
     vf = movie(tmp_path, two_d)
-    graph = graph_of(vf.filler_command("-i loader.mp4", 12.0, sbs=sbs))
+    graph = graph_of(vf.filler_command(["-i", "loader.mp4"], 12.0, sbs=sbs))
     assert graph.startswith("[0:v]")
     assert expected in graph
 
@@ -49,7 +47,7 @@ def test_filler_picture_vaapi(tmp_path: Path, two_d: bool, sbs: bool) -> None:
     """Every filler_command branch feeds the encoder too: VAAPI's filter suffix
     must end its graph exactly once, same as decode_command's branches."""
     vf = movie(tmp_path, two_d, "vaapi")
-    graph = graph_of(vf.filler_command("-i loader.mp4", 12.0, sbs=sbs))
+    graph = graph_of(vf.filler_command(["-i", "loader.mp4"], 12.0, sbs=sbs))
     assert graph.count("format=nv12,hwupload") == 1
     assert graph.endswith(",format=nv12,hwupload[v]")
 

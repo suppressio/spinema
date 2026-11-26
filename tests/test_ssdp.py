@@ -1,6 +1,11 @@
 """ssdp.py: the message building/parsing SsdpResponder sends over its
 multicast socket, tested on their own (no socket: see docs/DEVELOPMENT.md on
-what needs real hardware/network, out of scope for unit tests)."""
+what needs real hardware/network, out of scope for unit tests), and where its
+socket is bound."""
+from unittest.mock import Mock
+
+import pytest
+
 import ssdp
 
 
@@ -63,3 +68,36 @@ def test_search_targets_covers_the_device_and_its_services() -> None:
     assert root_usn == "uuid:abc::upnp:rootdevice"
     uuid_usn = next(usn for st, usn in targets if st == "uuid:abc")
     assert uuid_usn == "uuid:abc"
+
+
+def test_the_socket_is_bound_where_the_platform_allows(monkeypatch: pytest.MonkeyPatch) -> None:
+    bound: list[tuple[str, int]] = []
+    sock = Mock()
+    sock.bind.side_effect = bound.append
+    monkeypatch.setattr(ssdp.socket, "socket", Mock(return_value=sock))
+    monkeypatch.setattr(ssdp.osplatform, "multicast_bind_address", "bind:{}".format)
+    r = ssdp.SsdpResponder("http://x/description.xml", "u", "urn:d", [], "test")
+    monkeypatch.setattr(r, "_notify", Mock())
+    monkeypatch.setattr(ssdp.threading, "Thread", Mock())
+    r.start()
+    assert bound == [(f"bind:{ssdp.MULTICAST_ADDR}", ssdp.PORT)]
+
+
+def test_a_reset_from_a_gone_client_does_not_stop_the_responder() -> None:
+    # Windows reports an ICMP "port unreachable" for an earlier answer as
+    # WSAECONNRESET on the next recvfrom: discovery must go on
+    r = ssdp.SsdpResponder("http://x/description.xml", "u", "urn:d", [], "test")
+    sock = Mock()
+    calls = iter([ConnectionResetError(10054, "reset"), TimeoutError()])
+
+    def recvfrom(size: int) -> tuple[bytes, tuple[str, int]]:
+        err = next(calls, None)
+        if err is None:
+            r._stop.set()
+            raise TimeoutError
+        raise err
+
+    sock.recvfrom.side_effect = recvfrom
+    r._sock = sock
+    r._run()
+    assert sock.recvfrom.call_count == 3      # went on after the reset

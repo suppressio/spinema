@@ -18,7 +18,7 @@ streams, picture size, timestamps.
 import hashlib
 import json
 import os
-import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -34,10 +34,12 @@ from osplatform import DriveStatus, drive_status
 from pipeline import pick_encoder, quality_for
 from sources import BlurayDiscSource, MkvSource, Source, open_disc
 
-# real bash pipelines stopped with os.killpg, POSIX only until #103: a raise, not
+# test_decoded_3d_frames below still shells out to bash to pipe edge264 into ffmpeg
+# for its one-off frame comparison: not available on native Windows. A raise, not
 # pytest.skip(), so pyright leaves the module out on Windows too
 if sys.platform == "win32":
-    raise pytest.skip.Exception("POSIX only until #103", allow_module_level=True)
+    raise pytest.skip.Exception("needs bash (edge264 | ffmpeg) for the frame comparison",
+                                allow_module_level=True)
 
 pytestmark = pytest.mark.integration
 
@@ -114,29 +116,33 @@ def reference(source: Source) -> Reference:
     return Reference(_reference_key(source))
 
 
-def _read_command(cmd: str, size: int, fifo: str | None = None) -> tuple[bytes, bytes]:
-    """The first `size` bytes a reader command writes, and the first 256 KB of
-    the audio it writes into `fifo` (3D Blu-ray)."""
+def _read_command(cmd: list[str], size: int, audio_port: int | None = None,
+                  env: dict[str, str] | None = None) -> tuple[bytes, bytes]:
+    """The first `size` bytes a reader command (argv) writes, and the first 256 KB
+    of the audio it sends to 127.0.0.1:`audio_port` (3D Blu-ray), where this test
+    listens as ffmpeg would. `env`: the source's variables over os.environ (the
+    decryption backend, LIBAACS_PATH and LIBBDPLUS_PATH)."""
     audio = bytearray()
+    server = socket.create_server(("127.0.0.1", audio_port)) if audio_port else None
 
     def drain() -> None:
-        with Path(str(fifo)).open("rb") as f:
-            while len(audio) < 256 * 1024 and (chunk := f.read(65536)):
+        assert server is not None
+        with server, server.accept()[0] as conn:
+            while len(audio) < 256 * 1024 and (chunk := conn.recv(65536)):
                 audio.extend(chunk)
-            while f.read(1 << 20):                         # keep it flowing until the end
+            while conn.recv(1 << 20):                      # keep it flowing until the end
                 pass
 
-    reader = threading.Thread(target=drain, daemon=True) if fifo else None
+    reader = threading.Thread(target=drain, daemon=True) if server else None
     if reader:
         reader.start()
-    proc: subprocess.Popen[bytes] = subprocess.Popen(
-        ["bash", "-o", "pipefail", "-c", cmd], stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, start_new_session=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            env={**os.environ, **env} if env else None)
     assert proc.stdout is not None
     data = bytearray()
     while len(data) < size and (chunk := proc.stdout.read(min(1 << 20, size - len(data)))):
         data.extend(chunk)
-    os.killpg(proc.pid, signal.SIGKILL)
+    proc.kill()
     proc.wait()
     if reader:
         reader.join(timeout=10)
@@ -169,9 +175,9 @@ def test_keyframes(source: Source, reference: Reference) -> None:
 def _decoder_input(source: Source, at: float) -> tuple[bytes, bytes]:
     start = source.keyframe_at_or_before(at)
     cmd = source.video_command(start)
-    fifo = getattr(source, "_fifo", None) if isinstance(source, BlurayDiscSource) and \
-        not source.two_d else None
-    return _read_command(cmd, 12 * 1024 * 1024, fifo)
+    port = int(cmd[cmd.index("--audio-port") + 1]) if isinstance(source, BlurayDiscSource) \
+        and not source.two_d else None
+    return _read_command(cmd, 12 * 1024 * 1024, port, source.env)
 
 
 def test_decoder_input(source: Source, reference: Reference) -> None:

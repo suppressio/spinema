@@ -19,6 +19,8 @@ installed() { [ "$(dpkg-query -W -f '${db:Status-Status}' "$1" 2>/dev/null)" = i
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+# an install from before the Disks/Spinema rename (#196) left this mount point
+mkdir -p /srv/bd3d
 case "$mode" in
     recommends) apt-get install -y "$deb" ;;
     no-recommends) apt-get install -y --no-install-recommends "$deb" ;;
@@ -32,11 +34,37 @@ done
 grep -q '^# Permission to use, copy, modify, and distribute this software' "$app/mfusepy.py"
 
 spinema --version
+test ! -e /srv/bd3d
 # the DLNA path imports no FUSE module
 python3 -c "import sys; sys.path.insert(0, '$app'); import bd3d_fs"
 
+# the Samba block of the release before #196: postinst must replace it, every time
+old_share() {
+    sed -i '/^# >>> spinema >>>$/,/^# <<< spinema <<<$/d' /etc/samba/smb.conf
+    cat >> /etc/samba/smb.conf <<'OLD'
+
+# >>> spinema >>>
+[Disks]
+   path = /srv/bd3d
+   comment = Blu-ray and DVD, played on the fly
+   read only = yes
+   guest ok = yes
+   browseable = yes
+# <<< spinema <<<
+OLD
+    mkdir -p /srv/bd3d
+}
+
 if [ "$mode" = recommends ]; then
-    testparm -s | grep -q '^\[Disks\]$'
+    testparm -s | grep -q '^\[Spinema\]$'
+    old_share
+    dpkg-reconfigure spinema
+    dpkg-reconfigure spinema
+    test ! -e /srv/bd3d
+    testparm -s | grep -q '^\[Spinema\]$'
+    if testparm -s | grep -q '^\[Disks\]$'; then echo "old [Disks] share left" >&2; exit 1; fi
+    [ "$(grep -cxF '# >>> spinema >>>' /etc/samba/smb.conf)" = 1 ]
+    testparm -s --section-name Spinema --parameter-name path | grep -qx /srv/spinema
     grep -qxF user_allow_other /etc/fuse.conf
     # loads libfuse3 through mfusepy and builds the adapter, without mounting
     python3 - "$app" <<'PY'
@@ -44,12 +72,12 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import fuse_fs
 from tree import Tree
-assert "fuse3" in fuse_fs._LIBFUSE3, fuse_fs._LIBFUSE3
+assert fuse_fs._FUSE_LIBRARY is not None and "fuse3" in fuse_fs._FUSE_LIBRARY, fuse_fs._FUSE_LIBRARY
 libfuse = fuse_fs.mfusepy._libfuse
-assert libfuse._name == fuse_fs._LIBFUSE3, libfuse._name
+assert libfuse._name == fuse_fs._FUSE_LIBRARY, libfuse._name
 assert libfuse.fuse_version() >= 300, libfuse.fuse_version()
 fuse_fs.Bd3dFS(Tree())
-print("FUSE adapter loaded:", fuse_fs._LIBFUSE3, libfuse.fuse_version())
+print("FUSE adapter loaded:", fuse_fs._FUSE_LIBRARY, libfuse.fuse_version())
 PY
 else
     for package in fuse3 samba python3-pyfuse3 python3-trio; do
@@ -73,6 +101,7 @@ fi
 apt-get remove -y spinema
 # "! cmd" does not trip set -e: fail explicitly
 if grep -qsF '# >>> spinema >>>' /etc/samba/smb.conf; then exit 1; fi
+test ! -e /srv/spinema
 test ! -e /srv/bd3d
 if [ "$mode" = recommends ]; then
     grep -qxF user_allow_other /etc/fuse.conf

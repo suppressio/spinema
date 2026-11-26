@@ -14,9 +14,9 @@ video; --share dlna announces the same files over DLNA/UPnP instead (no FUSE
 mount, no Samba), for players that browse a media server (dlna.py).
 
 Usage:
-    python3 bd3d_fs.py [--mount /srv/bd3d] ~/Videos/3D [more MKVs or folders...]
+    python3 bd3d_fs.py [--mount /srv/spinema/Disks] ~/Videos/3D [more MKVs or folders...]
     python3 bd3d_fs.py                      # no source: watch every /dev/sr* found
-Unmount: Ctrl+C (or fusermount3 -u /srv/bd3d)
+Unmount: Ctrl+C (or fusermount3 -u /srv/spinema/Disks)
 
 Requires: edge264mvc_test, ffmpeg, ffprobe; fuse3 (libfuse3) for --share samba/both
 (fuse_fs.py, through the vendored mfusepy.py)
@@ -37,6 +37,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import osplatform
 from dlna import Dlna
 from langs import lang_list
 from library import HEAVY_DIR, LIGHT_DIR, MULTI_AUDIO_DIR, Library, Shelf
@@ -231,13 +232,15 @@ def require_fuse(share: str) -> None:
     must start on a system without fuse3."""
     try:
         importlib.import_module("fuse_fs")
-    except ImportError as e:
+    # mfusepy raises OSError when it finds no WinFsp
+    except (ImportError, OSError) as e:
         raise SystemExit(f"--share {share} mounts the files with FUSE, which is not installed "
-                         f"({e}): run scripts/install.sh --share {share}, "
-                         "install fuse3, or use --share dlna") from e
+                         f"({e}): {osplatform.fuse_install_hint(share)}") from e
 
 
 def require_samba(share: str) -> None:
+    if osplatform.WINDOWS:       # Windows' own SMB server shares the files
+        return
     # smbd lives in /usr/sbin, which Debian leaves out of a normal user's PATH
     path = os.pathsep.join([os.environ.get("PATH", os.defpath), "/usr/sbin", "/sbin"])
     if shutil.which("smbd", path=path) is None:
@@ -267,7 +270,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "to scan recursively. None given: watch every optical drive "
                              "found on this machine (/dev/sr*)")
     parser.add_argument("--version", action="version", version=f"spinema {program_version()}")
-    parser.add_argument("--mount", default="/srv/bd3d", help="mount point (default /srv/bd3d)")
+    parser.add_argument("--mount", default=osplatform.default_mount_point(),
+                        help="mount point (default /srv/spinema/Disks; on Windows "
+                             "C:\\Program Files\\Spinema\\share\\Disks)")
     parser.add_argument("--audio-lang", default="all",
                         help="audio languages to offer, e.g. ita,eng, or all (default: every "
                              "language on the disc, one track each)")
@@ -374,6 +379,42 @@ def write_structure(sources_args: list[str], out: str) -> None:
     log.info("%s: structure written to %s", source, out)
 
 
+def prepare_mount_point(mount: str) -> None:
+    """Create the FUSE mount point, e.g. Disks/ inside the installer's /srv/spinema.
+    On Windows only its parent: WinFsp creates the folder itself."""
+    if osplatform.fuse_creates_mount_point():
+        _prepare_winfsp_mount_point(mount)
+        return
+    if os.path.isdir(mount):
+        return
+    try:
+        os.makedirs(mount)
+    except FileExistsError as e:
+        # a FUSE mount left by a crash: isdir() fails (ENOTCONN), mkdir says EEXIST
+        raise SystemExit(f"cannot use {mount}: not a folder, or a mount left over from a crash? "
+                         f"Free it with 'fusermount3 -u {mount}' and start spinema again") from e
+    except OSError as e:
+        raise SystemExit(f"cannot create the mount point {mount}: {e.strerror}. Use a --mount "
+                         "folder you can write to; with the .deb, log in again after being "
+                         "added to group spinema") from e
+    # with the .deb, /srv/spinema belongs to group spinema: whoever starts spinema
+    # first creates Disks, and the other members must be able to mount on it too
+    os.chmod(mount, os.stat(mount).st_mode | stat.S_IWGRP)
+
+
+def _prepare_winfsp_mount_point(mount: str) -> None:
+    # WinFsp deletes its folder on unmount, and Windows does when the program
+    # dies: one still there is another spinema's mount, or a folder someone made
+    if os.path.lexists(mount):
+        raise SystemExit(f"cannot mount on {mount}: it exists already. Is spinema already "
+                         "running? If not, delete the folder: spinema creates it at every start")
+    try:
+        os.makedirs(os.path.dirname(mount), exist_ok=True)
+    except OSError as e:
+        raise SystemExit(f"cannot create the folder of {mount}: {e.strerror}. Use a --mount "
+                         "folder you can write to") from e
+
+
 def main() -> None:
     args = build_parser().parse_args()
     sources_args: list[str] = args.sources
@@ -421,6 +462,7 @@ def main() -> None:
     if use_fuse:
         require_fuse(share)
         require_samba(share)
+        prepare_mount_point(mount)
         import fuse_fs  # noqa: PLC0415
         fuse_fs.mount(tree, mount)
     dlna: Dlna | None = None

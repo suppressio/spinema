@@ -1,8 +1,8 @@
 🌐 [English](RESEARCH.md) | **Italiano**
 
-# Ricerca: playlist Blu-ray, scelta dei titoli, adapter FUSE
+# Ricerca: playlist Blu-ray, scelta dei titoli, adapter FUSE, port per Windows
 
-> Note di ricerca, raccolte il 2026-10-10 e il 2026-10-13 mentre si costruiva la scelta dei titoli per i Blu-ray con più episodi. Fatti sul formato delle playlist Blu-ray e su come altri programmi scelgono i titoli, ciascuno con la sua fonte; il formato non è pubblico, quindi vengono da documentazione ricostruita (reverse engineering), codice sorgente e forum. Il *Riepilogo* è la versione breve, le sezioni dopo contengono i risultati completi. Le citazioni testuali dalle fonti restano in inglese. Il codice che si basa su un risultato cita questo file (per esempio `src/sources.py`, Q4). L'ultima sezione, *L'adapter FUSE*, è un argomento a parte misurato il 2026-11-03, con le sue fonti.
+> Note di ricerca, raccolte il 2026-10-10 e il 2026-10-13 mentre si costruiva la scelta dei titoli per i Blu-ray con più episodi. Fatti sul formato delle playlist Blu-ray e su come altri programmi scelgono i titoli, ciascuno con la sua fonte; il formato non è pubblico, quindi vengono da documentazione ricostruita (reverse engineering), codice sorgente e forum. Il *Riepilogo* è la versione breve, le sezioni dopo contengono i risultati completi. Le citazioni testuali dalle fonti restano in inglese. Il codice che si basa su un risultato cita questo file (per esempio `src/sources.py`, Q4). Le ultime due sezioni sono argomenti a parte, con le loro fonti: *L'adapter FUSE*, misurato il 2026-11-03, e *Il port per Windows*, raccolto il 2026-11-20/21, con la scansione antivirus all'apertura aggiunta il 2026-11-26.
 
 ## Riepilogo
 
@@ -644,7 +644,7 @@ Sì: su libfuse3 mfusepy serve i file come faceva pyfuse3, senza perdere niente 
 ### Lacune
 
 - Non ancora provato con Samba e un player su hardware vero, né su Debian 13/Ubuntu 24.04 (libfuse 3.14, il cui `fuse_config` mfusepy gestisce a parte).
-- macOS (macFUSE, FUSE-T) e Windows (WinFsp): issue a parte.
+- macOS (macFUSE, FUSE-T): issue a parte. Windows (WinFsp): vedi *Il port per Windows* più sotto.
 
 ### Fonti
 
@@ -652,3 +652,55 @@ Sì: su libfuse3 mfusepy serve i file come faceva pyfuse3, senza perdere niente 
 - [go-fuse: opzione SyncRead, commit 15a8bb0](https://github.com/hanwen/go-fuse/commit/15a8bb029a4e1a51e10043c370970596b1fbb737)
 - [mailing list fuse-devel, 2011-05-14: letture gestite fuori ordine](https://sourceforge.net/p/fuse/mailman/message/27502648/)
 - [mfusepy su GitHub](https://github.com/mxmlnkn/mfusepy)
+
+## Il port per Windows: condivisione, adapter FUSE, audio 3D
+
+> Raccolto il 2026-11-20/21 per la [#102](https://github.com/suppressio/spinema/issues/102), l'approccio del port per Windows ([#10](https://github.com/suppressio/spinema/issues/10)): ricerca sui sorgenti di WinFsp e FFmpeg e sulle risposte del maintainer di WinFsp, poi una prova pratica su una VM Windows 11 (WinFsp 2.2, Python 3.13.1, il `src/mfusepy.py` del repo, un file system usa e getta; letture SMB da una macchina Linux con `smbclient`, SMB3). Ogni funzione di Linux deve funzionare su Windows, con un solo percorso di codice dove possibile (*Platforms* in `AGENTS.md`). [#106](https://github.com/suppressio/spinema/issues/106), [#107](https://github.com/suppressio/spinema/issues/107) e [#192](https://github.com/suppressio/spinema/issues/192) si basano su questi risultati.
+
+### In breve
+
+Windows serve i file virtuali come Linux, con WinFsp al posto di libfuse3 e il server SMB di Windows al posto di Samba. Spinema, avviato dall'utente normale e non elevato, monta i suoi file con mfusepy su una **cartella** sotto una cartella che l'installer condivide una volta: `<cartella di installazione>\share\Disks`, condivisa come `Spinema`. Una lettera di unità non funzionerebbe. `direct_io` è rispettato, quindi il passaggio animazione di caricamento → film funziona via SMB. L'audio 3D arriva a ffmpeg via TCP su loopback invece che con una FIFO, lo stesso codice su ogni piattaforma; non ci si aspettano avvisi del firewall (verificato con Python, non ancora con ffmpeg).
+
+### Risultati
+
+| Montato dall'utente normale (non elevato) | Condiviso da un amministratore con `New-SmbShare` | Letto da un'altra macchina |
+|---|---|---|
+| Unità `S:` | fallisce: "il dispositivo o directory non esiste" | — |
+| Cartella `C:\Spinema\Disks` (WinFsp la crea come junction) | fallisce: "file utilizzato da un altro processo" | — |
+| Cartella sotto la cartella padre condivisa `C:\Spinema` | OK | OK: il server SMB di Windows segue la junction |
+| `C:\Program Files\Spinema\share\Disks`, `share\` condivisa come `Spinema`, sola lettura | OK | OK; una scrittura viene rifiutata (`ACCESS_DENIED`) |
+
+- **Montaggio locale, non UNC.** WinFsp può montare un volume come disco locale o con un prefisso UNC (`-u \Server\Share`). Un volume con prefisso UNC non si può ri-condividere; solo uno locale può passare a `net share`/`NetShareAdd` ([winfsp#650](https://github.com/winfsp/winfsp/issues/650), maintainer). "Locale" riguarda come Windows vede il volume, non la rete: la cartella condivisa è comunque sulla LAN.
+- **Le lettere di unità stanno nel namespace della sessione.** WinFsp definisce un'unità con `DefineDosDeviceW` ([mount.c](https://github.com/winfsp/winfsp/blob/master/src/dll/mount.c)); per un chiamante che non è LocalSystem, Windows la crea nel namespace DOS locale di quella sessione di login, e solo il contesto LocalSystem ne crea una globale, che serve a `net share` ([winfsp#16](https://github.com/winfsp/winfsp/issues/16), che cita la documentazione Microsoft). Il modo documentato per condividere un'unità è far girare il file system come SYSTEM tramite il launcher di WinFsp (stessa issue). Verificato: un'unità montata dall'utente non si può condividere. Il montaggio su cartella evita sia la lettera di unità sia il servizio SYSTEM.
+- **Montaggio su cartella.** WinFsp accetta una cartella come punto di montaggio (`-m MountPoint [X:|*|directory]`, [tutorial](https://github.com/winfsp/winfsp/blob/master/doc/WinFsp-Tutorial.asciidoc)). La crea come junction (`IO_REPARSE_TAG_MOUNT_POINT`) e la cancella allo smontaggio (`DELETE_ON_CLOSE`, [mount.c](https://github.com/winfsp/winfsp/blob/master/src/dll/mount.c)). Quindi l'utente deve poter scrivere nella cartella padre, e la cartella padre non deve essere quella del programma: l'installer dà all'utente il permesso Modifica solo su `share\`. Verificato: l'utente non ha permessi di scrittura sulla cartella del programma.
+- **I processi elevati non entrano nella junction dell'utente.** Un processo elevato riceve "il percorso contiene un punto di montaggio non attendibile". I processi non elevati e il server SMB passano. Spinema e i player girano non elevati, quindi tocca solo gli strumenti da amministratore. Verificato.
+- **mfusepy su WinFsp.** mfusepy carica `winfsp-<arch>.dll` dalla cartella di installazione di WinFsp (registro `HKLM\SOFTWARE\WinFsp\InstallDir`) e fuori da Linux usa l'API FUSE 2. mfusepy però chiama lo stesso `init_with_config()`, senza config (`None`): quello che Spinema impostava in quella config (`use_ino`, i timeout) va a `mfusepy.FUSE()` come opzioni di montaggio, uguale su ogni piattaforma. WinFsp la chiama circa 10 ms **prima** che compaia la cartella di montaggio, quindi `fuse_fs.mount()` aspetta anche la cartella. Verificato (#106): montaggio, `getattr`, `readdir`, `open` e `read` funzionano, e `fuse_exit()` chiude subito il loop, anche con un file aperto.
+- **I timeout come opzione di montaggio.** `attr_timeout=` passato a `mfusepy.FUSE()` diventa `-o attr_timeout=`. WinFsp lo traduce in `FileInfoTimeout` (in ms, default 1000) e scarta `entry_timeout`, `kernel_cache` e simili ([fuse.c](https://github.com/winfsp/winfsp/blob/master/src/dll/fuse/fuse.c)). mfusepy passa la stessa opzione anche a libfuse3 (non è tra le opzioni che sposta nella config di FUSE 3). Verificato su WinFsp; su libfuse3 dedotto dal codice di mfusepy.
+- **Di chi sono i file.** In `getattr` un uid 0 compare come il SID `S-1-5-0`, -1 come "nobody" (`S-1-0-65534`). L'opzione di montaggio `uid=-1,gid=-1` li rende dell'utente che monta; libfuse3 legge le stesse opzioni `uid=`/`gid=`, lì con gli id dell'utente. In ogni caso tutti possono leggere (`0444`). Verificato (#106).
+- **La cartella dopo un crash.** La junction di WinFsp sparisce quando il processo viene terminato (`Stop-Process -Force`), e montare su una cartella che esiste già fallisce. Quindi una cartella `Disks` ancora presente vuol dire che un altro Spinema è in esecuzione, o che qualcuno l'ha creata. Verificato (#106).
+- **SSDP (scoperta DLNA).** Windows non permette il bind di un socket all'indirizzo multicast `239.255.255.250` (WinError 10049), come fa `ssdp.py` su Linux: lì fa il bind su `0.0.0.0` e si iscrive al gruppo allo stesso modo. La porta 1900 è condivisa con il servizio SSDP di Windows, che fa il bind su indirizzi singoli. Verificato (#106): un M-SEARCH dalla stessa macchina riceve risposta.
+- **`direct_io` è rispettato.** WinFsp traduce `fi.direct_io` in `DisableCache` sul file aperto ([fuse_intf.c](https://github.com/winfsp/winfsp/blob/master/src/dll/fuse/fuse_intf.c)). Verificato: con un solo handle aperto, tre letture all'offset 0 di un file `direct_io` hanno dato tre valori diversi, e ognuna è arrivata al file system. Anche via SMB ogni lettura ha dato byte nuovi. `keep_cache` viene ignorato, e di default WinFsp scarta la cache di un file quando viene chiuso (`FlushAndPurgeOnCleanup`).
+- **Audio 3D: TCP su loopback.** Su un disco 3D `disc_reader` scrive il video Annex B su stdout per edge264 e il TS audio in una FIFO che ffmpeg legge come secondo input. Su Windows le FIFO non esistono. Tre candidati:
+  - Pipe ereditata: scartata. `pipe:N` di FFmpeg prende un descrittore del runtime C (`strtol` poi `dup`, [file.c](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/file.c)), mentre `subprocess` di Python su Windows passa handle ereditati, non descrittori (dedotto dal sorgente di FFmpeg e dalla documentazione di Python, non eseguito). Su Windows servirebbe il protocollo `handle:` separato di FFmpeg, quindi due percorsi di codice; `handle:` è stato aggiunto a FFmpeg il 2026-10-10 ed è uscito per la prima volta nella 9.1 (novembre 2026); le build più vecchie non lo hanno.
+  - Flusso unico: scartato, perché edge264 legge solo Annex B.
+  - TCP su loopback: scelto. ffmpeg legge `tcp://127.0.0.1:<porta>?listen=1&listen_timeout=<ms>` ([tcp.c](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/tcp.c); nomi delle opzioni dal sorgente, non ancora eseguito con ffmpeg), e `disc_reader` si connette con il modulo `socket` standard.
+- **Firewall.** Un processo in ascolto su `127.0.0.1` non fa comparire nessun avviso di Windows Firewall. Il controllo, lo stesso processo su `0.0.0.0`, lo fa comparire subito. Verificato con `python.exe`; per ffmpeg ci si aspetta lo stesso comportamento (dedotto). Il server DLNA ascolta sulla LAN, quindi l'avviso comparirà: l'installer aggiunge la regola. Se si annulla l'avviso, Windows crea in silenzio una regola di **blocco** (visto nella prova).
+- **La scansione antivirus legge il file quando viene aperto.** Microsoft Defender scansiona ogni apertura di un file sul volume WinFsp (`RealTimeScan`, motivo `OnOpen`, processo `System (4)`), anche via SMB, e l'apertura del client aspetta la scansione. La scansione legge l'inizio del file, poi la fine. Verificato sulla VM ([#212](https://github.com/suppressio/spinema/issues/212)) con `New-MpPerformanceRecording` e `Get-MpPerformanceReport`, mentre `smbclient` apriva soltanto un file: la scansione è durata 3,9 s, quanto l'apertura. Il risultato non resta in cache, ogni apertura viene scansionata di nuovo; quando l'inizio del file è già nella cache di Spinema la scansione dura pochi ms. Così la prima apertura aspetta il film a 0:00:00: su una macchina più lenta del tempo reale `smbclient` ha rinunciato dopo 20 s ([#208](https://github.com/suppressio/spinema/issues/208)). Via SMB la scansione e il player leggono entrambi come `System (4)`, quindi Spinema non può distinguerli: ora l'animazione di caricamento risponde a ogni lettura dell'inizio del file che non è ancora in cache. Un'esclusione in Defender risolverebbe solo Defender e richiede un amministratore. Samba su Linux non ha una scansione all'accesso davanti (dedotto).
+
+### Lacune
+
+- ffmpeg stesso su Windows: l'ascolto su loopback è stato provato con Python, non con ffmpeg.
+- Nella VM non c'erano lettore ottico, disco né occhiali: rilevamento del lettore e librerie sono la [#104](https://github.com/suppressio/spinema/issues/104), edge264 la [#105](https://github.com/suppressio/spinema/issues/105), la riproduzione sugli occhiali la [#106](https://github.com/suppressio/spinema/issues/106).
+- Perché la cartella di montaggio non si possa condividere direttamente ("file utilizzato") non è noto. La causa probabile è l'handle che WinFsp tiene sulla junction; con una cartella padre condivisa non conta.
+
+### Fonti
+
+- [WinFsp: issue #16, condividere un'unità (maintainer)](https://github.com/winfsp/winfsp/issues/16)
+- [WinFsp: issue #650, i percorsi UNC non si possono condividere (maintainer)](https://github.com/winfsp/winfsp/issues/650)
+- [WinFsp: src/dll/mount.c](https://github.com/winfsp/winfsp/blob/master/src/dll/mount.c) (punti di montaggio su unità e cartella)
+- [WinFsp: src/dll/fuse/fuse.c](https://github.com/winfsp/winfsp/blob/master/src/dll/fuse/fuse.c) (opzioni di montaggio FUSE, `FileInfoTimeout`)
+- [WinFsp: src/dll/fuse/fuse_intf.c](https://github.com/winfsp/winfsp/blob/master/src/dll/fuse/fuse_intf.c) (`direct_io` → `DisableCache`)
+- [WinFsp: tutorial](https://github.com/winfsp/winfsp/blob/master/doc/WinFsp-Tutorial.asciidoc) (punto di montaggio: unità o cartella)
+- [FFmpeg: libavformat/file.c](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/file.c) (`pipe:`, `fd:`, `handle:`)
+- [FFmpeg: libavformat/tcp.c](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/tcp.c) (`listen`, `listen_timeout`)
+- [Microsoft: New-MpPerformanceRecording](https://learn.microsoft.com/powershell/module/defenderperformance/new-mpperformancerecording) (le scansioni di Defender: cosa, perché, quale processo)

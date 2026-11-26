@@ -3,11 +3,12 @@ set -e
 
 mark_begin="# >>> spinema >>>"
 mark_end="# <<< spinema <<<"
+base=/srv/spinema
 
 case "$1" in
     remove|purge)
-        if mountpoint -q /srv/bd3d; then
-            fusermount3 -u /srv/bd3d || umount /srv/bd3d || true
+        if mountpoint -q "$base/Disks"; then
+            fusermount3 -u "$base/Disks" || umount "$base/Disks" || true
         fi
         if grep -qsF "$mark_begin" /etc/samba/smb.conf; then
             sed -i "/^${mark_begin}\$/,/^${mark_end}\$/d" /etc/samba/smb.conf
@@ -17,7 +18,8 @@ case "$1" in
                 deb-systemd-invoke reload smbd.service || true
             fi
         fi
-        rmdir /srv/bd3d 2>/dev/null || true
+        # the mount point used before the Disks/Spinema rename, if still left over
+        rmdir "$base/Disks" "$base" /srv/bd3d 2>/dev/null || true
         ;;
 esac
 

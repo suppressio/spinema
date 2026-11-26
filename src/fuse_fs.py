@@ -1,39 +1,41 @@
 """fuse_fs.py — the FUSE front end (--share samba/both): mounts the Tree as a
-read-only file system for Samba to share, through mfusepy on libfuse3. The
-only module that needs FUSE: bd3d_fs.py imports it only when FUSE is used, so
---share dlna runs without FUSE installed.
+read-only file system for the SMB server to share (Samba, or Windows' own),
+through mfusepy on libfuse3 or WinFsp. The only module that needs FUSE:
+bd3d_fs.py imports it only when FUSE is used, so --share dlna runs without
+FUSE installed.
 
 mfusepy (src/mfusepy.py) is vendored as published (version 3.1.1, ISC
 license): Debian and Ubuntu do not package it, and it is one pure-Python
-file. Why mfusepy and how it is set up: docs/RESEARCH.md, "FUSE adapter".
+file. Why mfusepy and how it is set up: docs/RESEARCH.md, "FUSE adapter" and
+"Windows port".
 """
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import errno
 import itertools
 import logging
 import os
 import stat
-import subprocess
-import sys
 import threading
+import time
 import uuid
 from typing import Any
 
-_LIBFUSE3 = ctypes.util.find_library("fuse3")
-if _LIBFUSE3 is None:
-    raise ImportError("libfuse3 not found")
-# mfusepy loads libfuse 2 when both are installed: only libfuse3 is supported
-os.environ["FUSE_LIBRARY_PATH"] = _LIBFUSE3
+import osplatform
+
+# mfusepy loads libfuse 2 when both are installed: only libfuse3 is supported.
+# On Windows mfusepy finds WinFsp by itself.
+_FUSE_LIBRARY = osplatform.fuse_library()
+if _FUSE_LIBRARY is not None:
+    os.environ["FUSE_LIBRARY_PATH"] = _FUSE_LIBRARY
 
 import mfusepy  # noqa: E402  needs FUSE_LIBRARY_PATH set first
 from tree import FileEntry, Folder, Tree, read_as  # noqa: E402
 
 log = logging.getLogger("bd3d_fs")
 
-# the loaded libfuse3 itself, for the calls mfusepy does not wrap
+# the loaded libfuse3 (or WinFsp) itself, for the calls mfusepy does not wrap
 _libfuse: Any = mfusepy._libfuse  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
 # short: the tree changes when discs come and go. Also how long the kernel may
@@ -42,6 +44,7 @@ _libfuse: Any = mfusepy._libfuse  # noqa: SLF001  # pyright: ignore[reportPrivat
 # before telling us it is gone, and a call racing with that would crash
 ENTRY_TIMEOUT = ATTR_TIMEOUT = 5
 EXIT_WAIT = 10             # seconds for the FUSE loop to end on unmount
+MOUNT_WAIT = 10            # seconds for WinFsp's folder to appear after init
 
 
 class Bd3dFS(mfusepy.Operations):
@@ -62,13 +65,11 @@ class Bd3dFS(mfusepy.Operations):
         self._fuse_lock = threading.Lock()
         self.mounted = threading.Event()
 
+    # mfusepy calls it on FUSE 2 (WinFsp) too, with config_3 None: the options
+    # go to mfusepy.FUSE() instead (_Mount), the same on every platform
     def init_with_config(self, conn_info: Any, config_3: Any) -> None:  # noqa: ANN401, ARG002
         with self._fuse_lock:
             self._fuse = _libfuse.fuse_get_context().contents.fuse
-        if config_3 is not None:
-            config_3.use_ino = 1                    # tree ids as inode numbers
-            config_3.entry_timeout = ENTRY_TIMEOUT
-            config_3.attr_timeout = ATTR_TIMEOUT
         self.mounted.set()
 
     def destroy(self, path: str) -> None:  # noqa: ARG002
@@ -98,11 +99,9 @@ class Bd3dFS(mfusepy.Operations):
         return handle[0]
 
     def _attr(self, e: Folder | FileEntry) -> dict[str, int]:
-        if sys.platform == "win32":   # never imported there: no libfuse3 (WinFsp: #7)
-            raise NotImplementedError("FUSE is POSIX only until #7")
-        # mfusepy takes st_*time in nanoseconds when use_ns is set
-        a = {"st_ino": e.inode, "st_uid": os.getuid(), "st_gid": os.getgid(),
-             "st_blksize": 1 << 20,
+        # mfusepy takes st_*time in nanoseconds when use_ns is set; the owner
+        # is a mount option (_Mount)
+        a = {"st_ino": e.inode, "st_blksize": 1 << 20,
              "st_atime": e.mtime_ns, "st_mtime": e.mtime_ns, "st_ctime": e.mtime_ns}
         if isinstance(e, Folder):
             a |= {"st_mode": stat.S_IFDIR | 0o555, "st_nlink": 2, "st_size": 0}
@@ -187,9 +186,15 @@ class _Mount:
         self.thread = threading.Thread(target=self._run, name="FUSE", daemon=True)
 
     def _run(self) -> None:
+        # as mount options, which libfuse3 and WinFsp both read: tree ids as
+        # inode numbers, short caches, files owned by whoever mounts. WinFsp
+        # drops use_ino and entry_timeout, and has no allow_other: anyone may read
+        uid, gid = osplatform.fuse_owner()
         try:
             mfusepy.FUSE(self.fs, self.mount_point, raw_fi=True, foreground=True,
-                         ro=True, allow_other=True, fsname="bd3d")
+                         ro=True, allow_other=True, fsname="bd3d", use_ino=True,
+                         entry_timeout=ENTRY_TIMEOUT, attr_timeout=ATTR_TIMEOUT,
+                         uid=uid, gid=gid)
         except BaseException as e:  # noqa: BLE001  reported by mount() or serve()
             self.error = e
 
@@ -207,6 +212,14 @@ def mount(tree: Tree, mount_point: str) -> None:
     while not m.fs.mounted.wait(0.1):
         if not m.thread.is_alive():
             raise SystemExit(f"cannot mount on {mount_point}: {m.error or 'libfuse failed'}")
+    # WinFsp calls init before it creates the folder (~10 ms later); libfuse
+    # mounts on one that exists already
+    deadline = time.monotonic() + MOUNT_WAIT
+    while not os.path.isdir(mount_point) and m.thread.is_alive() \
+            and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not os.path.isdir(mount_point):
+        raise SystemExit(f"cannot mount on {mount_point}: {m.error or 'the folder did not appear'}")
     _mounted = m
     log.info("mounted on %s — Ctrl+C to unmount", mount_point)
 
@@ -237,7 +250,7 @@ def unmount() -> None:
     m.thread.join(EXIT_WAIT)
     if m.thread.is_alive():
         log.warning("%s: FUSE did not stop, unmounting it", m.mount_point)
-        subprocess.run(["fusermount3", "-u", "-z", m.mount_point], check=False)
+        osplatform.force_unmount(m.mount_point)
         m.thread.join(EXIT_WAIT)
 
 
@@ -246,7 +259,8 @@ def _process(tid: int) -> str:
     one per client. FUSE gives the id of the calling thread: its process (Tgid)
     is what smbstatus shows. Name in status stops at 15 characters, which cuts
     smbd's client IP: then the process title is used ("smbd: client
-    [192.168.68.65]"), capped, as for any other process it is its whole argv."""
+    [192.168.68.65]"), capped, as for any other process it is its whole argv.
+    Windows has no /proc: just the pid (4, "System", for its SMB server)."""
     try:
         with open(f"/proc/{tid}/status") as f:
             fields = dict(line.split(":", 1) for line in f if ":" in line)

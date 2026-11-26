@@ -22,7 +22,7 @@ Con cosa è stato provato finora questo progetto, e come è andata. Il [README](
 ✅ **Funziona, 3D compreso.** Il player per cui il progetto è nato.
 
 - [ ] Apri il **3D Player**, vai nella scheda **Rete locale** e aggiungi il PC: il suo indirizzo IP (sul PC lo trovi con `hostname -I`), accesso ospite / anonimo.
-- [ ] Apri **Disks**, poi la cartella e il film (se una cartella sembra vuota, torna indietro e rientra).
+- [ ] Apri **Spinema**, poi **Disks**, poi la cartella e il film (se una cartella sembra vuota, torna indietro e rientra).
 - [ ] Il player riconosce il formato affiancato e passa in 3D da solo. 🎉
 
 ![La riproduzione nel 3D Player VITURE: 3D attivo, barra di avanzamento, nome del file](screenshots/viture-3d-playback.png)
@@ -41,7 +41,7 @@ Da sapere:
 
 - [ ] Apri **File Manager** dalla barra in basso, poi **Local Network** a sinistra. Il PC compare da solo (col nome e con l'indirizzo IP).
 - [ ] La prima volta un avviso **Security Risk** dice che la connessione non è cifrata: **Got it** (è la rete di casa, e la cartella è in sola lettura).
-- [ ] Apri **Disks**, poi la cartella e il film.
+- [ ] Apri **Spinema**, poi **Disks**, poi la cartella e il film.
 - [ ] Se l'immagine mostra due figure affiancate, premi il pulsante a cubo nella barra del player (**Switch Mode**): **Non-VR** e **3D SBS**.
 - [ ] Nel menu a ingranaggio (**Advanced Settings → Aspect Ratio**) scegli **16:9**. 16:10 riempie di più lo schermo, ma allunga un po' l'immagine in altezza. 🎉
 

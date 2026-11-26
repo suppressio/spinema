@@ -4,9 +4,10 @@ disc_reader.py — read a 3D Blu-ray title from a disc/ISO/BDMV folder, decrypte
 on the fly, from a given time:
 
   stdout       Annex B H.264 + MVC (base + dependent view of each frame) for edge264
-  --audio-out  the selected audio track(s) as a small MPEG-TS for ffmpeg (a file
-               or a FIFO), written from its own thread with a large queue, so a
-               consumer that reads audio late never stalls the video
+  --audio-port the selected audio track(s) as a small MPEG-TS for ffmpeg, sent
+               over loopback TCP to 127.0.0.1:PORT, where ffmpeg listens (the
+               same on every platform, #192); written from its own thread with a
+               large queue, so a consumer that reads audio late never stalls the video
 
 A/V alignment: ffmpeg starts each input at its own first timestamp. The audio TS
 therefore also carries the first video frame (the keyframe we start from) as a
@@ -15,14 +16,17 @@ that frame's PTS and the audio lands exactly where it belongs.
 
 Usage:
     disc_reader.py /dev/sr0 --playlist 00070 --start 3000 --audio-pid 0x1102 \
-        --audio-out /tmp/audio.fifo | edge264mvc_test - -O | ffmpeg ...
+        --audio-port 50000 | edge264mvc_test - -O | \
+        ffmpeg -i - -f mpegts -i "tcp://127.0.0.1:50000?listen=1" ...
 """
 import argparse
 import contextlib
 import os
 import queue
+import socket
 import sys
 import threading
+import time
 from typing import BinaryIO
 
 from bdmv import PlayItem, m2ts_seek, open_ssif, parse_clpi, parse_mpls, ssif_seek
@@ -30,6 +34,11 @@ from bluray import Disc
 from ssif_demux import BASE_PID, SOURCE_PACKET, SsifDemuxer, timestamp
 
 PAT_PID, PMT_PID = 0x0000, 0x0100
+# 3D audio over loopback TCP (#192): disc_reader starts before ffmpeg listens, so
+# it tries again until AUDIO_CONNECT_TIMEOUT (ffmpeg's listen_timeout in sources.py
+# covers the other side)
+AUDIO_CONNECT_TIMEOUT = 60.0
+AUDIO_CONNECT_RETRY = 0.05
 
 Buffer = bytes | bytearray | memoryview
 
@@ -161,7 +170,8 @@ class VideoWriter:
 class AudioTap:
     """Forwards the TS packets of PAT, PMT, the chosen audio PIDs and the anchor frame."""
 
-    def __init__(self, path: str, audio_pids: set[int], start_pts: int) -> None:
+    def __init__(self, port: int, audio_pids: set[int], start_pts: int, *,
+                 connect_timeout: float = AUDIO_CONNECT_TIMEOUT) -> None:
         self.pids = audio_pids
         self.pmt = PmtRewriter(audio_pids | {BASE_PID})
         self.start = start_pts & ~0x1FF
@@ -173,17 +183,52 @@ class AudioTap:
         self.lo: int | None = None       # clip in/out time (90 kHz, clip timeline)
         self.hi: int | None = None
         self.q: queue.Queue[bytes | None] = queue.Queue(maxsize=4096)   # ~ tens of MB of audio
-        self.thread = threading.Thread(target=self._writer, args=(path,), daemon=True)
+        self.abort = threading.Event()
+        self.thread = threading.Thread(target=self._writer, args=(port, connect_timeout),
+                                       daemon=True)
         self.thread.start()
 
-    def _writer(self, path: str) -> None:
+    def _connect(self, port: int, timeout: float) -> socket.socket | None:
+        """ffmpeg may not listen yet: refused, wait a moment, try again, until the
+        deadline or until close(abort=True)."""
+        deadline = time.monotonic() + timeout
+        while not self.abort.is_set():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                sock = socket.create_connection(("127.0.0.1", port), timeout=left)
+            except OSError:              # refused (or, on Windows, timed out)
+                self.abort.wait(AUDIO_CONNECT_RETRY)
+                continue
+            try:
+                # TCP simultaneous open: connected to itself, and holding the port
+                # ffmpeg must listen on
+                usable = sock.getsockname() != sock.getpeername()
+            except OSError:              # reset as soon as accepted
+                usable = False
+            if not usable:               # let it go and try again
+                sock.close()
+                continue
+            sock.settimeout(None)
+            return sock
+        if not self.abort.is_set():
+            sys.stderr.write(f"disc_reader: no audio reader on 127.0.0.1:{port} after "
+                             f"{timeout:g}s: audio dropped\n")
+        return None
+
+    def _writer(self, port: int, timeout: float) -> None:
+        sock = self._connect(port, timeout)
         try:
-            with open(path, "wb") as f:  # opening a FIFO blocks until ffmpeg opens it
-                while (chunk := self.q.get()) is not None:
-                    f.write(chunk)
-        except BrokenPipeError:          # ffmpeg stopped reading (end, seek, stop)
-            while self.q.get() is not None:
-                pass
+            if sock is not None:
+                with sock:
+                    while (chunk := self.q.get()) is not None:
+                        sock.sendall(chunk)
+                    return
+        except OSError:                  # ffmpeg stopped reading (end, seek, stop)
+            pass
+        while self.q.get() is not None:  # nobody reads: keep the video going
+            pass
 
     def set_clip(self, delta: int, in_pts: int, out_pts: int) -> None:
         """Next play item: its audio keeps only [in, out) and is moved by `delta`
@@ -240,7 +285,11 @@ class AudioTap:
         if out:
             self.q.put(bytes(out))
 
-    def close(self) -> None:
+    def close(self, *, abort: bool = False) -> None:
+        """End of the audio: what is queued still goes to ffmpeg, waiting for it to
+        listen up to the deadline; `abort` (the video consumer is gone) stops waiting."""
+        if abort:
+            self.abort.set()
         self.q.put(None)
         self.thread.join()
 
@@ -346,7 +395,7 @@ def run_2d(disc: Disc, items: list[PlayItem], starts: list[float], first: int, s
 
 
 def run_3d(disc: Disc, items: list[PlayItem], starts: list[float], first: int, start: float,
-           audio_pids: set[int], audio_out: str | None) -> None:
+           audio_pids: set[int], audio_port: int | None) -> None:
     video = VideoWriter(sys.stdout.buffer)
     tap = None
     try:
@@ -359,8 +408,8 @@ def run_3d(disc: Disc, items: list[PlayItem], starts: list[float], first: int, s
                 offset, demux = sp.ssif_offset, SsifDemuxer(start_pts=sp.pts90)
                 sys.stderr.write(f"disc_reader: clip {item.clip}, keyframe "
                                  f"{starts[i] + sp.time:.3f}s, ssif offset {offset}\n")
-                if audio_out:
-                    tap = AudioTap(audio_out, audio_pids, sp.pts90)
+                if audio_port:
+                    tap = AudioTap(audio_port, audio_pids, sp.pts90)
             else:
                 # the next clip continues from its first byte; each clip
                 # restarts its timestamps, so its audio is moved onto the
@@ -385,7 +434,7 @@ def run_3d(disc: Disc, items: list[PlayItem], starts: list[float], first: int, s
     finally:
         video.close()
         if tap:
-            tap.close()
+            tap.close(abort=video.broken)
         with contextlib.suppress(BrokenPipeError):
             sys.stdout.close()
 
@@ -398,7 +447,8 @@ def main() -> None:
                     help="seconds from the start of the title (all its clips)")
     ap.add_argument("--audio-pid", action="append", default=[],
                     help="audio PID to forward (repeatable), e.g. 0x1102")
-    ap.add_argument("--audio-out", help="3D: file or FIFO for the audio TS")
+    ap.add_argument("--audio-port", type=int,
+                    help="3D: send the audio TS to 127.0.0.1:PORT, where ffmpeg listens")
     ap.add_argument("--mode", choices=["3d", "2d"], default="3d",
                     help="3d: Annex B MVC on stdout + audio TS; 2d: one filtered TS on stdout")
     args = ap.parse_args()
@@ -415,7 +465,7 @@ def main() -> None:
         if args.mode == "2d":
             run_2d(disc, items, starts, first, start, audio_pids)
         else:
-            run_3d(disc, items, starts, first, start, audio_pids, args.audio_out)
+            run_3d(disc, items, starts, first, start, audio_pids, args.audio_port)
 
 
 if __name__ == "__main__":

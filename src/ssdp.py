@@ -13,6 +13,8 @@ import socket
 import threading
 import time
 
+import osplatform
+
 MULTICAST_ADDR = "239.255.255.250"
 PORT = 1900
 MAX_AGE = 1800            # seconds a response/NOTIFY says it is valid for
@@ -109,9 +111,8 @@ class SsdpResponder:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # bound to the group, not to every interface: the socket gets only SSDP
-            # multicast (M-SEARCH), never datagrams addressed to this host (Linux)
-            sock.bind((MULTICAST_ADDR, PORT))
+            # bound to the group where the OS allows it (osplatform)
+            sock.bind((osplatform.multicast_bind_address(MULTICAST_ADDR), PORT))
             # INADDR_ANY: join the multicast group on every interface, not a listening
             # bind (SSDP discovery must be heard on whichever interface the LAN is on)
             group = socket.inet_aton(MULTICAST_ADDR) + socket.inet_aton("0.0.0.0")  # noqa: S104
@@ -142,7 +143,9 @@ class SsdpResponder:
         while not self._stop.is_set():
             try:
                 data, addr = sock.recvfrom(4096)
-            except TimeoutError:
+            # Windows: an answer that got "port unreachable" back (the client
+            # closed its port) fails the next recvfrom on this UDP socket
+            except (TimeoutError, ConnectionResetError):
                 data, addr = b"", None
             except OSError:
                 break

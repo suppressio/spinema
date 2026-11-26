@@ -11,21 +11,42 @@ REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
 [ "$(id -u)" -ne 0 ] || { echo "Run as your normal user, not as root."; exit 1; }
 
 old=$(cat "$PREFIX/app/version" 2>/dev/null || true)
+self="$REPO_DIR/scripts/update.sh"
+before=$(cksum < "$self")
 if git -C "$REPO_DIR" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
     git -C "$REPO_DIR" pull --ff-only
+fi
+# bash goes on reading the update.sh it started with, even once the pull has
+# replaced the file: run the new one, or what it adds (a migration, #196) would
+# wait for the next update. Once only: the second run pulls nothing new
+if [ -z "${SPINEMA_UPDATE_RERUN:-}" ] && [ "$(cksum < "$self")" != "$before" ]; then
+    echo "update.sh itself changed: running the new one"
+    SPINEMA_UPDATE_RERUN=1 exec bash "$self" "$@"
 fi
 # the release (git tag) of the checkout, e.g. v1.1.0, or v1.1.0-2-gabc1234 two commits later
 new=$(git -C "$REPO_DIR" describe --tags --always)
 
 pinned=$(sed -n 's/^EDGE264_COMMIT=//p' "$REPO_DIR/scripts/install.sh")
-if [ ! -x "$PREFIX/bin/edge264mvc_test" ] || [ "$(cat "$PREFIX/bin/edge264.commit" 2>/dev/null)" != "$pinned" ]; then
-    echo "edge264 or the installation itself needs setting up: running install.sh"
-    # keep the --share kind of the existing install (none recorded: install.sh's default)
-    # (an install from before the rename, bluray3d-xr, still has it under its old prefix)
-    share=
-    for file in "$PREFIX/app/share" /opt/bluray3d-xr/app/share; do
-        if [ -s "$file" ]; then share=$(head -n 1 "$file"); break; fi
-    done
+# keep the --share kind of the existing install (none recorded: install.sh's default)
+# (an install from before the rename, bluray3d-xr, still has it under its old prefix)
+share=
+for file in "$PREFIX/app/share" /opt/bluray3d-xr/app/share; do
+    if [ -s "$file" ]; then share=$(head -n 1 "$file"); break; fi
+done
+
+# the [spinema] block of smb.conf ($1) still shares /srv/bd3d: an install from
+# before the Disks/Spinema rename, whose share only install.sh knows how to migrate.
+# smb.conf, not the folder, which may survive install.sh (not empty); only our
+# own block, which install.sh rewrites, so a match cannot re-run it on every update
+old_share_layout() {
+    sed -n '/^# >>> spinema >>>$/,/^# <<< spinema <<<$/p' "$1" 2>/dev/null \
+        | grep -E '^[[:space:]]*path[[:space:]]*=[[:space:]]*/srv/bd3d[[:space:]]*$' >/dev/null
+}
+
+# --share dlna: install.sh leaves Samba alone, so it could not migrate the share
+if [ ! -x "$PREFIX/bin/edge264mvc_test" ] || [ "$(cat "$PREFIX/bin/edge264.commit" 2>/dev/null)" != "$pinned" ] \
+        || { [ "$share" != dlna ] && old_share_layout /etc/samba/smb.conf; }; then
+    echo "edge264, the installation, or the Samba share's layout needs setting up: running install.sh"
     exec "$REPO_DIR/scripts/install.sh" ${share:+--share "$share"}
 fi
 

@@ -5,15 +5,13 @@ so every byte served can be checked against the offset it was read at."""
 import copy
 import logging
 import re
-import shlex
-import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from datetime import timedelta
 from pathlib import Path
-from typing import Self, cast, override
+from typing import Any, Self, cast, override
 from unittest.mock import Mock, patch
 
 import pytest
@@ -25,19 +23,16 @@ from library import (
     AUDIO_TRACK_MUX,
     NULL_PACKET,
     TS_PACKET,
+    Generator,
     Library,
     SidecarFile,
     VirtualFile,
     null_padding,
 )
 from pipeline import QUALITIES, Quality
+from procchain import ProcessChain
 from sources import Source, SubTrack
 from tree import ROOT_ID, Folder, Tree, read_as
-
-# real pipelines here run through bash -o pipefail and are stopped with
-# os.killpg: neither exists on native Windows until #103 replaces them
-pytestmark = pytest.mark.skipif(sys.platform == "win32",
-                                reason="bash pipelines and os.killpg, POSIX only until #103")
 
 PPS = 500                                  # TS packets per second of movie
 BPS = PPS * TS_PACKET                      # bytes per second
@@ -66,7 +61,7 @@ while end is None or i < end:
 
 
 def producer(start: float, tag: bytes, ready_path: str | None = None,
-             duration: float | None = None) -> str:
+             duration: float | None = None) -> list[str]:
     """Numbered packets from `start` on: forever, like a pipeline the player stops,
     or for `duration` seconds, like ffmpeg -t. Whatever reads it to the end (the
     synthetic tail) needs the duration, or it waits forever and fills the memory."""
@@ -74,7 +69,7 @@ def producer(start: float, tag: bytes, ready_path: str | None = None,
     end = None if duration is None else first + int(duration * BPS) // TS_PACKET
     code = PRODUCER.format(ready_path=ready_path, first=first, tag=tag, every=KEYFRAME_EVERY,
                            end=end)
-    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    return [sys.executable, "-c", code]
 
 
 class FakeSource(Source):
@@ -93,27 +88,29 @@ class FakeSource(Source):
         return float(int(max(0.0, seconds)))
 
     @override
-    def video_command(self, start: float) -> str:
-        return ""
+    def video_command(self, start: float) -> list[str]:
+        return []
 
     @override
-    def audio_input(self, start: float) -> str:
-        return ""
+    def audio_input(self, start: float) -> list[str]:
+        return []
 
     @override
-    def audio_map(self, input_index: int = 1) -> str:
-        return ""
+    def audio_map(self, input_index: int = 1) -> list[str]:
+        return []
 
 
-def fake_decode(source: Source, start: float, output_args: str, filter_suffix: str = "") -> str:
+def fake_decode(source: Source, start: float, output_args: list[str],
+                filter_suffix: str = "") -> list[list[str]]:
     # the muxer's clock, and so the bytes, start at -output_ts_offset
-    m = re.search(r"-output_ts_offset (\S+)", output_args)
-    t0 = float(m.group(1)) if m else start
-    return producer(t0, b"M", source.ready_path if isinstance(source, FakeSource) else None)
+    t0 = (float(output_args[output_args.index("-output_ts_offset") + 1])
+         if "-output_ts_offset" in output_args else start)
+    return [producer(t0, b"M", source.ready_path if isinstance(source, FakeSource) else None)]
 
 
-def fake_filler(vf: VirtualFile, video_input: str, t0: float, duration: float | None = None,
-                extra: str = "", *, sbs: bool = False) -> str:
+def fake_filler(vf: VirtualFile, video_input: list[str], t0: float,
+                duration: float | None = None, extra: list[str] | None = None, *,
+                sbs: bool = False) -> list[str]:
     return producer(t0, b"L", duration=duration)
 
 
@@ -424,13 +421,16 @@ def test_loading_animation_after_a_jump(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(library, "AHEAD_MAX", 8 * 1024 * 1024)
     source = FakeSource(str(tmp_path / "disc"))
     vf = vfile(tmp_path, source, loader="spinner.mp4")
-    vf.read(0, 4096)                                     # first open: no animation
-    assert vf.gens[0].loader is None
+    ready_path = tmp_path / "movie_ready"
+    source.ready_path = str(ready_path)
+    vf.read(0, 4096)                                     # first open: the animation
+    assert vf.gens[0].loader is not None
+    ready_path.touch()
+    vf.read(4096, 4096)                                  # the player reads on: no pause
     # the movie's pipeline for the jump below waits for this file instead of a real
     # decoder's start-up time: the test controls exactly when it is "ready", not the
     # wall clock
-    ready_path = tmp_path / "movie_ready"
-    source.ready_path = str(ready_path)
+    ready_path.unlink()
     offset = 200 * BPS
     chunk = 32768
     ready_after = int(1.5 * BPS) // chunk + 1             # over 1.5s of animation first
@@ -453,6 +453,33 @@ def test_loading_animation_after_a_jump(tmp_path: Path, monkeypatch: pytest.Monk
     assert seen[switch][0] % KEYFRAME_EVERY == 0
     assert seen[switch][0] > 200 * PPS + PPS
     assert vf.gens[0].loader is None                     # the animation is stopped
+
+
+def test_loading_animation_at_the_first_open(tmp_path: Path) -> None:
+    # Windows' virus scan reads the file start while a client opens the file
+    # (#213): the animation answers it at once instead of the movie's start-up
+    vf = vfile(tmp_path, loader="spinner.mp4")
+    data = vf.read(0, 4096)
+    assert vf.gens[0].loader is not None
+    assert {tag for _, tag in packets(data, 0)} == {b"L"}
+
+
+def test_loading_animation_when_the_file_start_is_read_again(tmp_path: Path) -> None:
+    # a file opened again later, its pipeline stopped and its start not cached:
+    # the scan at the new open must not wait for the movie either
+    vf = vfile(tmp_path, loader="spinner.mp4")
+    vf.read(0, 4096)
+    vf.stop()
+    vf.head = None
+    vf.last_read = time.monotonic() - 600
+    vf.read(0, 4096)
+    assert vf.gens[0].loader is not None
+
+
+def test_no_animation_at_the_first_open_without_a_loader(tmp_path: Path) -> None:
+    vf = vfile(tmp_path)
+    vf.read(0, 4096)
+    assert vf.gens[0].loader is None
 
 
 def test_no_animation_when_paused(tmp_path: Path) -> None:
@@ -639,32 +666,92 @@ def test_slow_pipeline_is_logged(monkeypatch: pytest.MonkeyPatch,
 
 
 
-def test_no_pipeline_without_killpg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Windows: stop() could not kill the pipeline's process group, so none starts (#103)
-    monkeypatch.delattr(library.os, "killpg")
-    with pytest.raises(NotImplementedError, match=r"os\.killpg"):
-        library.Generator(vfile(tmp_path), 0.0)
-
-
-def test_stop_does_not_hang_on_a_stuck_pipeline(monkeypatch: pytest.MonkeyPatch,
-                                                caplog: pytest.LogCaptureFixture) -> None:
-    """A pipeline stuck on the drive survives SIGKILL: stop() returns all the same."""
+def test_generator_stop_kills_the_chain() -> None:
+    """stop() hands off to the chain Generator.__init__ built: what happens to the
+    processes themselves, including one that survives being killed, is
+    ProcessChain's own concern (tests/test_procchain.py)."""
     gen = object.__new__(library.Generator)
     gen.loader, gen.stopped, gen.cond = None, False, threading.Condition()
     gen.path = "Blu-ray 3D/ITA - x - 3D SBS.ts"
-    proc = Mock(pid=4242)
-    proc.poll.return_value = None
-    proc.wait.side_effect = subprocess.TimeoutExpired("ffmpeg", library.KILL_WAIT)
-    gen.proc = cast("subprocess.Popen[bytes]", proc)
-    killpg = Mock()
-    monkeypatch.setattr(library.os, "killpg", killpg)
-    caplog.set_level(logging.INFO, logger="bd3d_fs")
+    chain = Mock()
+    gen.chain = chain
     gen.stop()
-    if sys.platform != "win32":                  # for pyright: pytestmark skips Windows
-        killpg.assert_called_once_with(4242, library.signal.SIGKILL)
-    proc.wait.assert_called_once_with(library.KILL_WAIT)
+    chain.stop.assert_called_once_with(library.KILL_WAIT)
     assert gen.stopped
-    assert "did not exit 5s after SIGKILL" in caplog.text
+
+
+def test_a_stage_failing_fails_the_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                            caplog: pytest.LogCaptureFixture) -> None:
+    """pipefail: an early stage exiting nonzero is reported even though the chain's
+    last stage (the only one Generator reads from) still reaches a clean EOF."""
+    def fake_decode_failing(source: Source, start: float, output_args: list[str],
+                            filter_suffix: str = "") -> list[list[str]]:
+        return [
+            [sys.executable, "-c", "import sys; sys.exit(1)"],
+            [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        ]
+
+    monkeypatch.setattr(library, "decode_command", fake_decode_failing)
+    caplog.set_level(logging.WARNING, logger="bd3d_fs")
+    vf = vfile(tmp_path)
+    gen = vf._generator_for(0, 1)
+    assert gen is not None
+    try:
+        deadline = time.monotonic() + 10
+        with gen.cond:
+            while not gen.eof and time.monotonic() < deadline:
+                gen.cond.wait(timeout=0.2)
+        assert gen.eof
+        assert "the pipeline failed" in caplog.text
+    finally:
+        gen.stop()
+
+def test_a_movie_pipeline_that_cannot_start_stops_its_loader(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The loading animation starts before the movie's chain: a movie chain that
+    cannot start (its decoder missing) must not leave the animation running."""
+    chains: list[ProcessChain] = []
+
+    class RecordingChain(ProcessChain):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+            super().__init__(*args, **kwargs)
+            chains.append(self)
+
+    def fake_decode_missing(source: Source, start: float, output_args: list[str],
+                            filter_suffix: str = "") -> list[list[str]]:
+        return [["/no/such/decoder-spinema-test"]]
+
+    monkeypatch.setattr(library, "ProcessChain", RecordingChain)
+    monkeypatch.setattr(library, "decode_command", fake_decode_missing)
+    vf = vfile(tmp_path, loader="spinner.mp4")
+    with pytest.raises(FileNotFoundError):
+        Generator(vf, 0, with_loader=True)
+    assert len(chains) == 1                                   # the loader's
+    assert all(p.poll() is not None for p in chains[0].processes)
+
+
+def test_eof_is_not_held_by_a_stage_that_does_not_exit(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The output reached EOF but a stage stays alive (stuck on the drive): the
+    readers still get EOF in bounded time, not a 60 s wait per read."""
+    def fake_decode_lingering(source: Source, start: float, output_args: list[str],
+                              filter_suffix: str = "") -> list[list[str]]:
+        return [[sys.executable, "-c", "import time; time.sleep(60)"],
+                [sys.executable, "-c", "pass"]]
+
+    monkeypatch.setattr(library, "decode_command", fake_decode_lingering)
+    monkeypatch.setattr(library, "KILL_WAIT", 0.5)
+    vf = vfile(tmp_path)
+    gen = Generator(vf, 0)
+    try:
+        deadline = time.monotonic() + 5
+        with gen.cond:
+            while not gen.eof and time.monotonic() < deadline:
+                gen.cond.wait(timeout=0.2)
+        assert gen.eof
+    finally:
+        gen.stop()
+
 
 # --- the tree of files ---------------------------------------------------------
 
@@ -706,7 +793,7 @@ def test_library_threads_vaapi_device_to_virtual_files(tmp_path: Path) -> None:
                   vaapi_device="/dev/dri/renderD128")
     lib.add(DiscSource(str(tmp_path / "d")))
     vf = movies(tree)[0]
-    assert "-vaapi_device /dev/dri/renderD128" in vf.encode_args
+    assert vf.encode_args[vf.encode_args.index("-vaapi_device") + 1] == "/dev/dri/renderD128"
     assert vf.filter_suffix == "format=nv12,hwupload"
 
 
@@ -763,7 +850,7 @@ def test_library_both_light_and_removal(tmp_path: Path) -> None:
     tree, lib = make_library(tmp_path, audio_files="both", light=True, sub_langs=[])
     source = DiscSource(str(tmp_path / "d"))
     source.sidecars = [(".ita.srt", str(tmp_path / "x.ita.srt"))]
-    (tmp_path / "x.ita.srt").write_text("1\n")
+    (tmp_path / "x.ita.srt").write_bytes(b"1\n")
     added = lib.add(source)
     expected: list[str] = []
     for folder in ("Blu-ray", "Blu-ray/Light"):
@@ -813,7 +900,7 @@ def test_library_heavy_layout(tmp_path: Path, kind: str, light: bool, extra: boo
     source.two_d = kind != "3d"
     source.category = {"2d": "Blu-ray", "3d": "Blu-ray 3D", "dvd": "DVD"}[kind]
     source.subfolder = "Extra" if extra else ""
-    (tmp_path / "sidecar").write_text("1\n")
+    (tmp_path / "sidecar").write_bytes(b"1\n")
     source.sidecars = [(".ita.srt", str(tmp_path / "sidecar"))]
     added = lib.add(source)
     # Each enabled quality mirrors normal, including subtitles, sidecars and multi-audio.
@@ -839,9 +926,10 @@ def test_heavy_seek_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kin
     q = QUALITIES[(kind, "heavy")]
     bps = q.bytes_per_sec
 
-    def decode(source: Source, start: float, output_args: str, filter_suffix: str = "") -> str:
-        assert f"-muxrate {q.muxrate}" in output_args
-        assert f"-b:v {q.video // 1000}k" in output_args
+    def decode(source: Source, start: float, output_args: list[str],
+              filter_suffix: str = "") -> list[list[str]]:
+        assert output_args[output_args.index("-muxrate") + 1] == str(q.muxrate)
+        assert f"{q.video // 1000}k" in output_args
         return fake_decode(source, start, output_args, filter_suffix)
 
     # Scale the numbered-packet producer to the actual Heavy byte/time mapping.
