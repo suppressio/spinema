@@ -6,7 +6,7 @@
 
 Torna al [README](../README.it.md).
 
-- **Il film non compare e il log dice `cannot decrypt`**: nessuna chiave funzionante per quel disco. Aggiorna il `KEYDB.cfg`, oppure installa e registra MakeMKV (strada nativa).
+- **Il film non compare e il log dice `cannot decrypt`**: nessuna chiave funzionante per quel disco. Aggiorna il `KEYDB.cfg`, oppure installa MakeMKV (strada nativa) e aprilo una volta per far partire il periodo di prova o inserire una chiave: installato ma mai attivato non decifra niente, e un disco che libaacs non apre può restare bloccato per minuti (vedi [Decifratura](../README.it.md#decifratura-le-chiavi-le-porti-tu)).
 - **Un Blu-ray non compare, il log dice `BD+ disc: not decrypted`**: il disco ha la protezione BD+ e libbdplus non è partito: manca la sua configurazione `~/.config/bdplus/vm0/` (vedi [Decifratura](../README.it.md#decifratura-le-chiavi-le-porti-tu)). MakeMKV aprirebbe il disco, ma le sue correzioni sbagliano dopo un salto nel film, quindi per il BD+ non viene usato.
 - **Un Blu-ray non compare, il log dice `BD+ disc: no conversion table`**: libbdplus parte, ma in `~/.config/bdplus/convtab/` non c'è la tabella di questo disco. Senza, libbdplus eseguirebbe da solo il programma BD+ del disco, che sui dischi più recenti fallisce e rovina l'immagine, quindi il disco viene saltato. Aggiungi gli aggiornamenti dell'archivio che contengono il tuo disco.
 - **Un film con BD+ parte ma si rovina dopo un salto**: sul tuo sistema `libbdplus.so.0` potrebbe essere un link a `libmmbd` di MakeMKV (una vecchia ricetta di MakeMKV). Il programma non può accorgersene; togli il link e reinstalla libbdplus.
