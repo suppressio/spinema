@@ -1095,6 +1095,32 @@ def test_decrypted_with(protection: str, env: dict[str, str], expected: str) -> 
     assert sources._decrypted_with(info, env) == expected
 
 
+def test_open_disc_loads_makemkv_only_for_its_own_attempt(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows: libmmbd64 loaded only for the MakeMKV attempt, so libbluray cannot
+    # fall back to it while libaacs is tried and the log names the right backend (#207)
+    events: list[str] = []
+
+    class Disc(FakeBluray):
+        def __init__(self, path: str) -> None:
+            env = os.environ.get("LIBAACS_PATH")
+            events.append(f"open {env}")
+            super().__init__(decrypted=env == "libmmbd")
+
+    def load_makemkv() -> None:
+        events.append("load makemkv")
+
+    def both() -> list[dict[str, str]]:
+        return [{}, {"LIBAACS_PATH": "libmmbd", "LIBBDPLUS_PATH": "libmmbd"}]
+
+    monkeypatch.setattr(bluray_module, "Disc", Disc)
+    monkeypatch.setattr(sources, "load_makemkv", load_makemkv)
+    monkeypatch.setattr(sources, "_decrypt_backends", both)
+    monkeypatch.delenv("LIBAACS_PATH", raising=False)
+    sources._open_disc("/dev/sr0")
+    assert events == ["open None", "load makemkv", "open libmmbd"]
+
+
 def test_open_disc_tries_every_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str | None] = []
 

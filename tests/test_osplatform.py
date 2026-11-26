@@ -227,6 +227,10 @@ def test_load_library_raises_with_the_advice_when_nothing_works(
         osplatform.load_library("bluray", "apt install libbluray2")
 
 
+def _no_library(name: str) -> str | None:
+    return None
+
+
 def _windows_library_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                          files: list[str]) -> tuple[Path, list[str], list[str]]:
     """A fake <Program Files>\\Spinema\\dll with these files; records what is
@@ -250,6 +254,7 @@ def _windows_library_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     monkeypatch.setattr(osplatform, "WINDOWS", True)
     monkeypatch.setattr(osplatform, "_dll_directories", {})
     monkeypatch.setenv("PROGRAMW6432", str(tmp_path))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "no-x86"))
     monkeypatch.setattr(osplatform.os, "add_dll_directory", add_dll_directory, raising=False)
     def nothing(name: str) -> str | None:
         return None
@@ -337,6 +342,68 @@ def test_load_library_on_windows_a_broken_optional_companion_only_warns(
     assert osplatform.load_library("bluray", "install libbluray") is LIB
     assert loaded == [str(dll / "libaacs.dll"), "libbluray-4.dll"]
     assert "libbdplus.dll cannot be loaded, going on without it" in caplog.text
+
+
+def _makemkv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    makemkv = tmp_path / "x86" / "MakeMKV"
+    makemkv.mkdir(parents=True)
+    (makemkv / "libmmbd64.dll").touch()
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "x86"))
+    monkeypatch.setattr(osplatform, "_makemkv_loaded", set[Path]())
+    return makemkv / "libmmbd64.dll"
+
+
+def test_load_library_on_windows_leaves_makemkv_alone(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # not loaded with libbluray: libbluray would fall back to it while libaacs
+    # is tried, and a never-activated MakeMKV hangs there (#207)
+    dll, _, loaded = _windows_library_dir(
+        monkeypatch, tmp_path, ["libaacs.dll", "libbluray-4.dll"])
+    _makemkv(monkeypatch, tmp_path)
+    monkeypatch.delenv("LIBAACS_PATH", raising=False)
+    osplatform.load_library("bluray", "install libbluray")
+    assert loaded == [str(dll / "libaacs.dll"), "libbluray-4.dll"]
+
+
+def test_load_library_on_windows_loads_makemkv_in_its_subprocess(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # a pipeline subprocess for a disc MakeMKV opened gets LIBAACS_PATH=libmmbd
+    dll, _, loaded = _windows_library_dir(
+        monkeypatch, tmp_path, ["libaacs.dll", "libbluray-4.dll"])
+    mmbd = _makemkv(monkeypatch, tmp_path)
+    monkeypatch.setenv("LIBAACS_PATH", "libmmbd")
+    osplatform.load_library("bluray", "install libbluray")
+    assert loaded == [str(dll / "libaacs.dll"), str(mmbd), "libbluray-4.dll"]
+
+
+def test_load_makemkv_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _, _, loaded = _windows_library_dir(monkeypatch, tmp_path, [])
+    mmbd = _makemkv(monkeypatch, tmp_path)
+    osplatform.load_makemkv()
+    osplatform.load_makemkv()
+    assert loaded == [str(mmbd)]
+
+
+def test_load_makemkv_not_installed_does_nothing(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _, _, loaded = _windows_library_dir(monkeypatch, tmp_path, [])
+    osplatform.load_makemkv()
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
+    osplatform.load_makemkv()
+    assert loaded == []
+
+
+def test_has_library_mmbd_on_windows_looks_in_makemkv_folder(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setattr(osplatform, "LINUX", False)
+    monkeypatch.setenv("PROGRAMW6432", str(tmp_path / "pf"))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "x86"))
+    monkeypatch.setattr(osplatform.ctypes.util, "find_library", _no_library)
+    assert osplatform.has_library("mmbd") is False
+    (tmp_path / "x86" / "MakeMKV").mkdir(parents=True)
+    (tmp_path / "x86" / "MakeMKV" / "libmmbd64.dll").touch()
+    assert osplatform.has_library("mmbd") is True
 
 
 def test_has_library_found_by_the_system_lookup(monkeypatch: pytest.MonkeyPatch) -> None:

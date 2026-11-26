@@ -44,7 +44,7 @@ import dvd
 import lookup
 from bdmv import Clip, PlayItem, m2ts_seek, parse_clpi, parse_mpls, ssif_seek
 from langs import lang as to_lang
-from osplatform import has_library
+from osplatform import has_library, load_makemkv
 
 log = logging.getLogger("bd3d_fs")
 
@@ -378,6 +378,8 @@ def _open_disc(path: str) -> tuple[bluray.Disc, bluray.DiscInfo, dict[str, str]]
     for env in _decrypt_backends():
         saved = {k: os.environ.get(k) for k in ("LIBAACS_PATH", "LIBBDPLUS_PATH")}
         os.environ.update(env)
+        if env.get("LIBAACS_PATH") == "libmmbd":
+            load_makemkv()
         try:
             disc = bluray.Disc(path)
             info = disc.info()
