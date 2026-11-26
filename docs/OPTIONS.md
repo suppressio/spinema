@@ -20,7 +20,7 @@ The defaults work: you only need this page to change what the share offers (lang
 | [3D subtitle depth](#subtitles) (pixels) | `SUB_DEPTH` | `--sub-depth 8` | `8` |
 | [Lower-bitrate copies in `Light/`](#network-and-quality) | `LIGHT=on\|off` | `--light` / `--no-light` | on |
 | [Higher-bitrate copies in `Heavy/`](#network-and-quality) | `HEAVY=on\|off` | `--heavy` / `--no-heavy` | off |
-| [Animation after a jump](#loading-animation-after-a-jump-or-at-the-start) | `LOADER` | `--loader retrowave\|simple\|none\|video.mp4`, `--loader-3d video.mp4` | `retrowave` |
+| [Loading animation](#loading-animation-after-a-jump-or-at-the-start) | `LOADER` | `--loader retrowave\|simple\|none\|video.mp4`, `--loader-3d video.mp4` | `retrowave` |
 | [Video encoder](#video-encoder) | `ENCODER` | `--encoder auto\|nvenc\|vaapi\|x264` | `auto` (NVENC, then VAAPI, then x264) |
 | [Share over Samba, DLNA, or both](#dlnaupnp-instead-of-samba) | `SHARE` | `--share samba\|dlna\|both` | `samba` |
 | [DLNA/HTTP port](#dlnaupnp-instead-of-samba) | `HTTP_PORT` | `--http-port` | `8201` |
