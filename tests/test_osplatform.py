@@ -316,8 +316,27 @@ def test_load_library_on_windows_a_broken_companion_says_which(
         raise OSError("[WinError 126] The specified module could not be found")
 
     monkeypatch.setattr(osplatform.ctypes, "CDLL", cdll)
-    with pytest.raises(OSError, match=r"libaacs\.dll.*cannot be loaded.*WinError 126"):
+    with pytest.raises(OSError, match=r"libaacs\.dll cannot be loaded: \[WinError 126\]"):
         osplatform.load_library("bluray", "install libbluray")
+
+
+def test_load_library_on_windows_a_broken_optional_companion_only_warns(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        caplog: pytest.LogCaptureFixture) -> None:
+    # a broken libbdplus or MakeMKV must not take AACS-only discs down with it
+    dll, _, loaded = _windows_library_dir(
+        monkeypatch, tmp_path, ["libaacs.dll", "libbdplus.dll", "libbluray-4.dll"])
+
+    def cdll(name: str) -> ctypes.CDLL:
+        if name.endswith("libbdplus.dll"):
+            raise OSError("[WinError 193] %1 is not a valid Win32 application")
+        loaded.append(name)
+        return LIB
+
+    monkeypatch.setattr(osplatform.ctypes, "CDLL", cdll)
+    assert osplatform.load_library("bluray", "install libbluray") is LIB
+    assert loaded == [str(dll / "libaacs.dll"), "libbluray-4.dll"]
+    assert "libbdplus.dll cannot be loaded, going on without it" in caplog.text
 
 
 def test_has_library_found_by_the_system_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
