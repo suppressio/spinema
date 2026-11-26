@@ -72,12 +72,12 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import fuse_fs
 from tree import Tree
-assert "fuse3" in fuse_fs._LIBFUSE3, fuse_fs._LIBFUSE3
+assert fuse_fs._FUSE_LIBRARY is not None and "fuse3" in fuse_fs._FUSE_LIBRARY, fuse_fs._FUSE_LIBRARY
 libfuse = fuse_fs.mfusepy._libfuse
-assert libfuse._name == fuse_fs._LIBFUSE3, libfuse._name
+assert libfuse._name == fuse_fs._FUSE_LIBRARY, libfuse._name
 assert libfuse.fuse_version() >= 300, libfuse.fuse_version()
 fuse_fs.Bd3dFS(Tree())
-print("FUSE adapter loaded:", fuse_fs._LIBFUSE3, libfuse.fuse_version())
+print("FUSE adapter loaded:", fuse_fs._FUSE_LIBRARY, libfuse.fuse_version())
 PY
 else
     for package in fuse3 samba python3-pyfuse3 python3-trio; do
