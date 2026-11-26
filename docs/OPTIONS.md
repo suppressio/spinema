@@ -151,7 +151,7 @@ So by default the file carries a loading animation, in a loop, from the landing 
 - you see at once that it is loading;
 - but the player's clock keeps running during the animation, and the movie starts **that many seconds later** than where you jumped: under a second on a DVD, 2-5 s on a Blu-ray from the drive. The two things cannot go together: every second of the file is one second of the movie, and the seconds taken by the animation cannot be used again.
 
-It is not shown when the player is paused (it waits for the movie's frame) nor when a file is first opened.
+It is also shown when a file is first opened, so the movie's first seconds may be covered by it. It is not shown when the player is paused (it waits for the movie's frame).
 
 - `--loader simple` (Docker: `LOADER=simple`): a plainer one, a disc and a spinning arc, 2D.
 - `--loader none` (Docker: `LOADER=none`): no animation. The player waits on the frozen picture and the movie starts exactly where you jumped.

@@ -421,10 +421,16 @@ class VirtualFile:
                 old.stop()
                 self.stale, self.stale_until = old, time.monotonic() + STALE_KEEP
                 self.stale_logged = False
+            # the animation after a jump and at the first read of the file (on
+            # Windows the virus scan reads the start while a client opens the
+            # file, and the open waits for it), not for a paused player: its one
+            # still frame must be the movie
+            first = self.prev_read == 0.0
             quiet = time.monotonic() - self.prev_read
-            log.debug("%s: jump, no reads in the %.1fs before", self.path, quiet)
+            log.debug("%s: %s", self.path, "first read" if first
+                      else f"jump, no reads in the {quiet:.1f}s before")
             g = Generator(self, offset / self.bytes_per_sec,
-                          with_loader=bool(self.loader) and quiet < PAUSED_AFTER)
+                          with_loader=bool(self.loader) and (first or quiet < PAUSED_AFTER))
             self.gens.append(g)
             return g
 

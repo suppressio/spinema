@@ -151,7 +151,7 @@ Per questo il file, di default, contiene un'animazione di caricamento, in loop, 
 - vedi subito che sta caricando;
 - però durante l'animazione il contatore del player continua ad avanzare, e il film riparte **altrettanti secondi dopo** il punto in cui hai saltato: meno di un secondo su un DVD, 2-5 s su un Blu-ray dal lettore. Le due cose non possono stare insieme: ogni secondo del file è un secondo del film, e i secondi occupati dall'animazione non si possono riusare.
 
-Non compare quando il player è in pausa (aspetta il fotogramma del film) né alla prima apertura di un file.
+Compare anche alla prima apertura di un file, quindi può coprire i primi secondi del film. Non compare quando il player è in pausa (aspetta il fotogramma del film).
 
 - `--loader simple` (Docker: `LOADER=simple`): una più sobria, un disco e un arco che gira, in 2D.
 - `--loader none` (Docker: `LOADER=none`): niente animazione. Il player aspetta sull'immagine ferma e il film riparte esattamente dove hai saltato.
