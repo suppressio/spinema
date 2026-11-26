@@ -158,13 +158,14 @@ _LIBRARY_VERSIONS: dict[str, tuple[int, ...]] = {
 # fail later with a vaguer error); the optional ones only warn, so a broken
 # libbdplus or MakeMKV does not take AACS-only discs down with it.
 _WINDOWS_COMPANIONS: dict[str, tuple[tuple[str, bool], ...]] = {
-    "bluray": (("libaacs.dll", True), ("libbdplus.dll", False), ("libmmbd64.dll", False)),
+    "bluray": (("libaacs.dll", True), ("libbdplus.dll", False)),
     "dvdread": (("libdvdcss-2.dll", True),),
 }
 
 # add_dll_directory's handles: the folder leaves the search path when one is
 # garbage-collected, so they are kept for the whole process
 _dll_directories: dict[str, object] = {}
+_makemkv_loaded: set[Path] = set()
 
 
 def _names(name: str) -> list[str]:
@@ -187,6 +188,38 @@ def _windows_install_dir() -> Path:
     return Path(program_files) / "Spinema"
 
 
+def _makemkv_library() -> Path | None:
+    """MakeMKV's libmmbd64.dll on Windows, in MakeMKV's own folder: it is
+    proprietary, so it is never shipped with Spinema. None if not installed."""
+    if not WINDOWS:
+        return None
+    folders = [os.environ.get("PROGRAMFILES(X86)") or "C:\\Program Files (x86)",
+               os.environ.get("PROGRAMW6432") or "C:\\Program Files"]
+    for folder in folders:
+        path = Path(folder) / "MakeMKV" / "libmmbd64.dll"
+        if path.exists():
+            return path
+    return None
+
+
+def load_makemkv() -> None:
+    """Windows: load MakeMKV's libmmbd64.dll, for the attempt that decrypts with
+    MakeMKV. libbluray falls back to it by module name when libaacs cannot
+    decrypt (aacs.c); LIBAACS_PATH set from here would not reach it (libbluray's
+    msvcrt does not see what Python's ucrt sets). Not loaded before that attempt,
+    so a disc libaacs opens never touches MakeMKV, and the log names the right
+    backend. Elsewhere libbluray finds libmmbd by itself."""
+    path = _makemkv_library()
+    if path is None or path in _makemkv_loaded:
+        return
+    try:
+        ctypes.CDLL(str(path))
+    except OSError as e:
+        log.warning("%s cannot be loaded, going on without it: %s", path, e)
+        return
+    _makemkv_loaded.add(path)
+
+
 def library_dir() -> Path | None:
     """The folder the Windows installer puts the disc DLLs in; None elsewhere,
     where the system's own lookup finds them."""
@@ -197,20 +230,22 @@ def _prepare_library_dir(name: str) -> None:
     """Windows: put our DLL folder on the search path (Python ignores PATH for
     DLLs since 3.8) and load the libraries `name` loads by itself."""
     folder = library_dir()
-    if folder is None or not folder.is_dir():
-        return
-    if str(folder) not in _dll_directories:
-        _dll_directories[str(folder)] = os.add_dll_directory(str(folder))  # type: ignore[attr-defined,unused-ignore]
-    for companion, required in _WINDOWS_COMPANIONS.get(name, ()):
-        path = folder / companion
+    companions: list[tuple[Path, bool]] = []
+    if folder is not None and folder.is_dir():
+        if str(folder) not in _dll_directories:
+            _dll_directories[str(folder)] = os.add_dll_directory(str(folder))  # type: ignore[attr-defined,unused-ignore]
+        companions = [(folder / c, required) for c, required in _WINDOWS_COMPANIONS.get(name, ())]
+    for path, required in companions:
         if not path.exists():
-            continue  # not installed: no libbdplus, no MakeMKV
+            continue  # not installed: no libbdplus
         try:
             ctypes.CDLL(str(path))
         except OSError as e:
             if required:
                 raise OSError(f"{path} cannot be loaded: {e}") from e
             log.warning("%s cannot be loaded, going on without it: %s", path, e)
+    if name == "bluray" and os.environ.get("LIBAACS_PATH") == "libmmbd":
+        load_makemkv()  # a pipeline subprocess started for a disc MakeMKV opened
 
 
 def load_library(name: str, advice: str) -> ctypes.CDLL:
@@ -231,6 +266,8 @@ def has_library(name: str) -> bool:
     """Whether a shared library is installed, without loading it: libmmbd
     (MakeMKV) is picked as a decryption backend only when present, since it is
     optional and proprietary."""
+    if WINDOWS and name == "mmbd":
+        return _makemkv_library() is not None
     if ctypes.util.find_library(name):
         return True
     return LINUX and any(Path("/usr/lib", n).exists() for n in _names(name))
