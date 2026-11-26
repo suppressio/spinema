@@ -20,7 +20,7 @@ The defaults work: you only need this page to change what the share offers (lang
 | [3D subtitle depth](#subtitles) (pixels) | `SUB_DEPTH` | `--sub-depth 8` | `8` |
 | [Lower-bitrate copies in `Light/`](#network-and-quality) | `LIGHT=on\|off` | `--light` / `--no-light` | on |
 | [Higher-bitrate copies in `Heavy/`](#network-and-quality) | `HEAVY=on\|off` | `--heavy` / `--no-heavy` | off |
-| [Animation after a jump](#loading-animation-after-a-jump) | `LOADER` | `--loader retrowave\|simple\|none\|video.mp4`, `--loader-3d video.mp4` | `retrowave` |
+| [Animation after a jump](#loading-animation-after-a-jump-or-at-the-start) | `LOADER` | `--loader retrowave\|simple\|none\|video.mp4`, `--loader-3d video.mp4` | `retrowave` |
 | [Video encoder](#video-encoder) | `ENCODER` | `--encoder auto\|nvenc\|vaapi\|x264` | `auto` (NVENC, then VAAPI, then x264) |
 | [Share over Samba, DLNA, or both](#dlnaupnp-instead-of-samba) | `SHARE` | `--share samba\|dlna\|both` | `samba` |
 | [DLNA/HTTP port](#dlnaupnp-instead-of-samba) | `HTTP_PORT` | `--http-port` | `8201` |
@@ -143,7 +143,7 @@ If playback **pauses every few seconds**, the Wi-Fi cannot keep up with that bit
   ```
   If instead it says "only 0.5s of movie is ready ahead: the disc or the decoding cannot keep up", `Light/` will not help: look at the disc (scratches, fingerprints) and at the CPU.
 
-## Loading animation after a jump
+## Loading animation after a jump or at the start
 
 After a jump with the seek bar the movie needs a few seconds (the drive moves, then decoding starts). Meanwhile the player shows the last picture, frozen, and its clock stands still: it looks stuck, but the movie then starts **exactly where you jumped**.
 
@@ -151,7 +151,7 @@ So by default the file carries a loading animation, in a loop, from the landing 
 - you see at once that it is loading;
 - but the player's clock keeps running during the animation, and the movie starts **that many seconds later** than where you jumped: under a second on a DVD, 2-5 s on a Blu-ray from the drive. The two things cannot go together: every second of the file is one second of the movie, and the seconds taken by the animation cannot be used again.
 
-It is also shown when a file is first opened, so the movie's first seconds may be covered by it. It is not shown when the player is paused (it waits for the movie's frame).
+It is also shown when a file is opened and its start is not ready yet, so the movie's first seconds may be covered by it. It is not shown when the player is paused (it waits for the movie's frame).
 
 - `--loader simple` (Docker: `LOADER=simple`): a plainer one, a disc and a spinning arc, 2D.
 - `--loader none` (Docker: `LOADER=none`): no animation. The player waits on the frozen picture and the movie starts exactly where you jumped.
