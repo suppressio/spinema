@@ -198,7 +198,10 @@ class Disc:
             _libbluray().bd_get_titles(self._bd, TITLES_RELEVANT, 0)
 
     def open(self, path: str) -> DiscFile:
-        h = _libbluray().bd_open_file_dec(self._bd, path.encode())
+        # libbluray decrypts only paths starting with "BDMV" DIR_SEP "STREAM",
+        # its own separator ("\\" on Windows): with "/" there it opens the
+        # file but hands back the encrypted bytes
+        h = _libbluray().bd_open_file_dec(self._bd, path.replace("/", os.sep).encode())
         if not h:
             raise OSError(f"cannot open {path} on the disc")
         return DiscFile(h, path)

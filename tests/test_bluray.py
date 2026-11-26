@@ -65,3 +65,40 @@ def test_disc_starts_libbdplus_on_bdplus_discs(monkeypatch: pytest.MonkeyPatch,
     disc = bluray.Disc("/dev/sr0")
     assert titles == ([1] if bdplus else [])
     disc.close()
+
+
+@pytest.mark.parametrize(("sep", "expected"), [("/", b"BDMV/STREAM/SSIF/00098.ssif"),
+                                               ("\\", b"BDMV\\STREAM\\SSIF\\00098.ssif")])
+def test_streams_are_opened_with_the_native_separator(
+        monkeypatch: pytest.MonkeyPatch, sep: str, expected: bytes) -> None:
+    # libbluray decrypts a file only when its path starts with "BDMV" DIR_SEP
+    # "STREAM", and DIR_SEP is "\\" on Windows: with "/" it hands back the
+    # encrypted bytes, and every pipeline fails (#104, seen on Windows 11)
+    opened: list[bytes] = []
+
+    class Info:
+        bdplus_detected = False
+
+    class Ptr:
+        contents = Info()
+
+    class Lib:
+        def bd_open(self, path: bytes, key: None) -> int:
+            return 1
+
+        def bd_get_disc_info(self, bd: int) -> Ptr:
+            return Ptr()
+
+        def bd_open_file_dec(self, bd: int, path: bytes) -> int:
+            opened.append(path)
+            return 1
+
+        def bd_close(self, bd: int) -> None:
+            pass
+
+    monkeypatch.setattr(bluray, "_libbluray", Lib)
+    monkeypatch.setattr(bluray.os, "sep", sep)
+    disc = bluray.Disc("/dev/sr0")
+    disc.open("BDMV/STREAM/SSIF/00098.ssif")
+    assert opened == [expected]
+    disc.close()
