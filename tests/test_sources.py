@@ -1083,16 +1083,51 @@ def test_decrypt_backends(monkeypatch: pytest.MonkeyPatch) -> None:
                                               "LIBBDPLUS_PATH": "libmmbd"}
 
 
-@pytest.mark.parametrize(("protection", "env", "expected"), [
-    ("", {}, "not encrypted"),
-    ("AACS", {}, "AACS, decrypted with libaacs"),
-    ("AACS + BD+", {"LIBAACS_PATH": "libmmbd", "LIBBDPLUS_PATH": "libmmbd"},
+MMBD_ENV = {"LIBAACS_PATH": "libmmbd", "LIBBDPLUS_PATH": "libmmbd"}
+
+
+@pytest.mark.parametrize(("protection", "env", "used", "expected"), [
+    ("", {}, ("", ""), "not encrypted"),
+    ("AACS", {}, ("", ""), "AACS, decrypted with libaacs"),
+    ("AACS + BD+", MMBD_ENV, ("", ""), "AACS + BD+, decrypted with MakeMKV (libmmbd)"),
+    ("AACS + BD+", {}, ("", ""), "AACS + BD+, decrypted with libaacs + libbdplus"),
+    # what libbluray says it used wins over the attempt's environment (#207):
+    # it falls back to libmmbd by itself when libaacs has no key
+    ("AACS", {}, ("libmmbd", ""), "AACS, decrypted with MakeMKV (libmmbd)"),
+    ("AACS", MMBD_ENV, ("libaacs", ""), "AACS, decrypted with libaacs"),
+    ("AACS + BD+", {}, ("libmmbd", "libbdplus"),
+     "AACS + BD+, decrypted with MakeMKV (libmmbd) + libbdplus"),
+    ("AACS + BD+", {}, ("libmmbd", "libmmbd"), "AACS + BD+, decrypted with MakeMKV (libmmbd)"),
+    # LIBBDPLUS_PATH exported with a file name or a path: still MakeMKV
+    # (libbluray then forces the AACS to libmmbd too, dec.c)
+    ("AACS + BD+", {}, ("libmmbd", "/usr/lib/x86_64-linux-gnu/libmmbd.so.0"),
      "AACS + BD+, decrypted with MakeMKV (libmmbd)"),
-    ("AACS + BD+", {}, "AACS + BD+, decrypted with libaacs + libbdplus"),
+    ("AACS + BD+", {}, ("libaacs", "libmmbd"),
+     "AACS + BD+, decrypted with libaacs + MakeMKV (libmmbd)"),
 ])
-def test_decrypted_with(protection: str, env: dict[str, str], expected: str) -> None:
-    info = FakeBluray(protection=protection).info()
+def test_decrypted_with(protection: str, env: dict[str, str], used: tuple[str, str],
+                        expected: str) -> None:
+    info = FakeBluray(protection=protection, aacs_library=used[0],
+                      bdplus_library=used[1]).info()
     assert sources._decrypted_with(info, env) == expected
+
+
+def test_open_disc_refuses_bdplus_libbluray_gave_to_makemkv(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # libbluray hands BD+ to libmmbd too when the AACS went through it
+    # (bdplus.c): refused even in the attempt without LIBBDPLUS_PATH (#207)
+    class Disc(FakeBluray):
+        def __init__(self, path: str) -> None:
+            super().__init__(protection="AACS + BD+", aacs_library="libmmbd",
+                             bdplus_library="libmmbd")
+
+    def libaacs_only() -> list[dict[str, str]]:
+        return [{}]
+
+    monkeypatch.setattr(bluray_module, "Disc", Disc)
+    monkeypatch.setattr(sources, "_decrypt_backends", libaacs_only)
+    with pytest.raises(sources.UnsupportedDiscError, match="MakeMKV"):
+        sources._open_disc("/dev/sr0")
 
 
 def test_open_disc_loads_makemkv_only_for_its_own_attempt(
