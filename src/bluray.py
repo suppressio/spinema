@@ -8,11 +8,15 @@ libbluray picks the AACS/BD+ backend when the disc is opened:
   - libmmbd (MakeMKV)                        LIBAACS_PATH=libmmbd LIBBDPLUS_PATH=libmmbd
   - nothing, for unencrypted ISO/BDMV folders
 """
+import contextlib
 import ctypes
 import functools
 import os
+import re
 import subprocess
 import sys
+import threading
+from collections.abc import Generator
 from ctypes import (
     CFUNCTYPE,
     POINTER,
@@ -108,6 +112,8 @@ class DiscInfo:
     decrypted: bool       # False: AACS/BD+ present and not handled by any backend
     aacs_error: int
     protection: str = ""   # "AACS", "AACS + BD+", ... ('' = not encrypted)
+    aacs_library: str = ""    # what libbluray used: "libaacs", "libmmbd"; '' = unknown
+    bdplus_library: str = ""  # "libbdplus", "libmmbd"; '' = none or unknown
 
 
 @dataclass
@@ -134,7 +140,90 @@ def _libbluray() -> ctypes.CDLL:
     lib.bd_get_title_info.restype = POINTER(_TitleInfo)
     lib.bd_get_title_info.argtypes = [c_void_p, c_uint32, c_uint32]
     lib.bd_free_title_info.argtypes = [POINTER(_TitleInfo)]
+    lib.bd_get_debug_mask.restype = c_uint32
+    lib.bd_set_debug_mask.argtypes = [c_uint32]
+    lib.bd_set_debug_handler.argtypes = [c_void_p]
     return lib
+
+
+# libbluray's log masks (log_control.h)
+DBG_BLURAY = 0x40
+DBG_CRIT = 0x800
+_DEBUG_MASK_UNSET = 0xFFFFFFFF   # libbluray has not logged yet
+_LOG_FUNC = CFUNCTYPE(None, c_char_p)
+# the name is libbluray's candidate as given: "libaacs", "libmmbd", or
+# LIBAACS_PATH / LIBBDPLUS_PATH as the user set it (a file name, a path)
+_USING = re.compile(r"Using (.+) for (AACS|BD\+)\s*$")
+# libbluray's critical messages: the ones it shows by default (DBG_CRIT); the
+# DBG_BLURAY ones turned on while capturing say what was loaded or found
+_CRITICAL = re.compile(r"fail|error|unable|no usable|warning|too old|not initialized|"
+                       r"not found|could not|cannot|can't|invalid|corrupt", re.IGNORECASE)
+_NO_PROTECTION = re.compile(r"No (AACS|BD\+) protection")   # said for every disc
+_capture_lock = threading.Lock()   # one log handler for the whole process
+_captured: list[str] = []          # the open's messages, while _capture_lock is held
+_capture_mask = [DBG_CRIT]         # the user's mask during that open
+
+
+def _log_handler(message: bytes | None) -> None:
+    text = (message or b"").decode("utf-8", "replace")
+    _captured.append(text)
+    if _shown_while_capturing(text, _capture_mask[0]):
+        sys.stderr.write(text)
+
+
+# one callback for the process, never freed: a libbluray thread that read the
+# handler just before it is removed can still call it safely
+_LOG_CALLBACK = _LOG_FUNC(_log_handler)
+
+
+def _effective_debug_mask(current: int) -> int:
+    """The mask libbluray logs with. Before its first message it still reads
+    BD_DEBUG_MASK, else uses DBG_CRIT (logging.c)."""
+    if current != _DEBUG_MASK_UNSET:
+        return current
+    try:
+        return int(os.environ["BD_DEBUG_MASK"], 0)
+    except (KeyError, ValueError):
+        return DBG_CRIT
+
+
+def _shown_while_capturing(line: str, debug_mask: int) -> bool:
+    """Whether a message libbluray sends while we capture reaches stderr, as it
+    would have without the capture."""
+    if debug_mask & DBG_BLURAY:
+        return True
+    return bool(_CRITICAL.search(line)) and not _NO_PROTECTION.search(line)
+
+
+def _libraries_used(lines: list[str]) -> tuple[str, str]:
+    """(AACS library, BD+ library) libbluray says it loaded; the last one counts,
+    as libbluray loads the next library when one cannot decrypt (aacs.c)."""
+    used = {"AACS": "", "BD+": ""}
+    for line in lines:
+        if m := _USING.search(line):
+            used[m.group(2)] = m.group(1)
+    return used["AACS"], used["BD+"]
+
+
+@contextlib.contextmanager
+def _capture_log() -> Generator[list[str]]:
+    """libbluray's messages while a disc opens, with its "Using libX for AACS"
+    lines turned on: which library decrypted is not in BLURAY_DISC_INFO, and
+    libbluray falls back to MakeMKV's libmmbd by itself when libaacs has no key."""
+    lib = _libbluray()
+    # held for the whole open: a never-activated MakeMKV can make another drive's
+    # open wait minutes, as libmmbd would hang that open anyway
+    with _capture_lock:
+        mask = _effective_debug_mask(lib.bd_get_debug_mask())
+        _capture_mask[0] = mask
+        _captured.clear()
+        lib.bd_set_debug_mask(mask | DBG_BLURAY)
+        lib.bd_set_debug_handler(ctypes.cast(_LOG_CALLBACK, c_void_p))
+        try:
+            yield _captured
+        finally:
+            lib.bd_set_debug_handler(None)
+            lib.bd_set_debug_mask(mask)
 
 
 TITLES_RELEVANT = 0x03
@@ -188,14 +277,16 @@ class DiscFile:
 
 class Disc:
     def __init__(self, path: str) -> None:
-        self._bd: int | None = _libbluray().bd_open(path.encode(), None)
-        if not self._bd:
-            raise OSError(f"cannot open Blu-ray: {path}")
-        # libbluray starts libbdplus, which loads the disc's cached conversion
-        # table, only on bd_get_titles()/bd_play(): without this call BD+ clips
-        # are read unfixed (#87)
-        if _libbluray().bd_get_disc_info(self._bd).contents.bdplus_detected:
-            _libbluray().bd_get_titles(self._bd, TITLES_RELEVANT, 0)
+        with _capture_log() as log:
+            self._bd: int | None = _libbluray().bd_open(path.encode(), None)
+            if not self._bd:
+                raise OSError(f"cannot open Blu-ray: {path}")
+            # libbluray starts libbdplus, which loads the disc's cached conversion
+            # table, only on bd_get_titles()/bd_play(): without this call BD+ clips
+            # are read unfixed (#87)
+            if _libbluray().bd_get_disc_info(self._bd).contents.bdplus_detected:
+                _libbluray().bd_get_titles(self._bd, TITLES_RELEVANT, 0)
+            self._libraries = _libraries_used(log)
 
     def open(self, path: str) -> DiscFile:
         # libbluray decrypts only paths starting with "BDMV" DIR_SEP "STREAM",
@@ -217,7 +308,9 @@ class Disc:
                         decrypted=bool(not encrypted or handled),
                         aacs_error=d.aacs_error_code,
                         protection=" + ".join(p for p, on in (("AACS", d.aacs_detected),
-                                                              ("BD+", d.bdplus_detected)) if on))
+                                                              ("BD+", d.bdplus_detected)) if on),
+                        aacs_library=self._libraries[0] if d.aacs_detected else "",
+                        bdplus_library=self._libraries[1] if d.bdplus_detected else "")
 
     def titles(self, min_seconds: int = 600) -> list[Title]:
         """Playlists at least min_seconds long, duplicates removed."""

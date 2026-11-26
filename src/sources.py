@@ -338,12 +338,28 @@ def _decrypt_backends() -> list[dict[str, str]]:
     return envs
 
 
+def _by_makemkv(info: bluray.DiscInfo, env: dict[str, str]) -> tuple[bool, bool]:
+    """(AACS, BD+) decrypted by MakeMKV's libmmbd. What libbluray says it used
+    wins: it falls back to libmmbd by itself when libaacs has no key, and then
+    hands it BD+ too (bdplus.c). The attempt's environment only when unknown."""
+    def by(library: str, variable: str) -> bool:
+        # a name or path the user gave counts too ("libmmbd.so.0", "...\\libmmbd64")
+        return "mmbd" in (library or env.get(variable, ""))
+    return (by(info.aacs_library, "LIBAACS_PATH"),
+            "BD+" in info.protection and by(info.bdplus_library, "LIBBDPLUS_PATH"))
+
+
 def _decrypted_with(info: bluray.DiscInfo, env: dict[str, str]) -> str:
     """For the log and problem reports: which protection, opened by which backend."""
     if not info.protection:
         return "not encrypted"
-    if env.get("LIBAACS_PATH") == "libmmbd":
+    aacs_mmbd, bdplus_mmbd = _by_makemkv(info, env)
+    if aacs_mmbd:
         backend = "MakeMKV (libmmbd)"
+        if "BD+" in info.protection and not bdplus_mmbd:
+            backend += " + libbdplus"
+    elif bdplus_mmbd:
+        backend = "libaacs + MakeMKV (libmmbd)"
     elif "BD+" in info.protection:
         backend = "libaacs + libbdplus"
     else:
@@ -383,8 +399,9 @@ def _open_disc(path: str) -> tuple[bluray.Disc, bluray.DiscInfo, dict[str, str]]
         try:
             disc = bluray.Disc(path)
             info = disc.info()
-            bdplus_by_mmbd = ("BD+" in info.protection
-                              and os.environ.get("LIBBDPLUS_PATH") == "libmmbd")
+            # the environment in force, a LIBBDPLUS_PATH the user exported included
+            in_force = {k: v for k in saved if (v := os.environ.get(k))}
+            bdplus_by_mmbd = _by_makemkv(info, in_force)[1]
             if info.decrypted and not bdplus_by_mmbd:
                 if "BD+" in info.protection and not bluray.bdplus_table_found(path):
                     disc.close()
@@ -392,7 +409,7 @@ def _open_disc(path: str) -> tuple[bluray.Disc, bluray.DiscInfo, dict[str, str]]
                         "BD+ disc: no conversion table for it in "
                         "~/.config/bdplus/convtab (libbdplus), see "
                         "Decryption in the README")
-                log.info("%s: %s", path, _decrypted_with(info, env))
+                log.info("%s: %s", path, _decrypted_with(info, in_force))
                 return disc, info, env
             last = info
             disc.close()
