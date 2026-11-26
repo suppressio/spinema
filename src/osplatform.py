@@ -15,6 +15,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import glob
+import logging
 import os
 import string
 import subprocess
@@ -23,6 +24,8 @@ from ctypes import wintypes
 from enum import Enum, auto
 from pathlib import Path
 from typing import cast
+
+log = logging.getLogger("bd3d_fs")
 
 LINUX = sys.platform == "linux"
 MACOS = sys.platform == "darwin"
@@ -151,9 +154,12 @@ _LIBRARY_VERSIONS: dict[str, tuple[int, ...]] = {
 # so they are loaded first from our folder: Windows then hands back the module
 # already loaded with that name. Their own dependencies (libgcrypt...) are found
 # through add_dll_directory while we load them.
-_WINDOWS_COMPANIONS: dict[str, tuple[str, ...]] = {
-    "bluray": ("libaacs.dll", "libbdplus.dll", "libmmbd64.dll"),
-    "dvdread": ("libdvdcss-2.dll",),
+# Required ones stop the load when present but broken (every encrypted disc would
+# fail later with a vaguer error); the optional ones only warn, so a broken
+# libbdplus or MakeMKV does not take AACS-only discs down with it.
+_WINDOWS_COMPANIONS: dict[str, tuple[tuple[str, bool], ...]] = {
+    "bluray": (("libaacs.dll", True), ("libbdplus.dll", False), ("libmmbd64.dll", False)),
+    "dvdread": (("libdvdcss-2.dll", True),),
 }
 
 # add_dll_directory's handles: the folder leaves the search path when one is
@@ -195,14 +201,16 @@ def _prepare_library_dir(name: str) -> None:
         return
     if str(folder) not in _dll_directories:
         _dll_directories[str(folder)] = os.add_dll_directory(str(folder))  # type: ignore[attr-defined,unused-ignore]
-    for companion in _WINDOWS_COMPANIONS.get(name, ()):
+    for companion, required in _WINDOWS_COMPANIONS.get(name, ()):
         path = folder / companion
         if not path.exists():
-            continue  # optional: no libbdplus, no MakeMKV
+            continue  # not installed: no libbdplus, no MakeMKV
         try:
             ctypes.CDLL(str(path))
         except OSError as e:
-            raise OSError(f"{path} cannot be loaded, a DLL it needs is missing: {e}") from e
+            if required:
+                raise OSError(f"{path} cannot be loaded: {e}") from e
+            log.warning("%s cannot be loaded, going on without it: %s", path, e)
 
 
 def load_library(name: str, advice: str) -> ctypes.CDLL:
