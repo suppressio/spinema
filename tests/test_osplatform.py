@@ -165,9 +165,12 @@ def test_load_library_tries_candidates_in_order(monkeypatch: pytest.MonkeyPatch)
 def test_names_windows_dll_candidates_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(osplatform, "MACOS", False)
     monkeypatch.setattr(osplatform, "WINDOWS", True)
-    # newest version first, then the unversioned fallback, no "lib" prefix
-    assert osplatform._names("bluray") == ["bluray-4.dll", "bluray-2.dll", "bluray.dll"]
-    assert osplatform._names("mmbd") == ["mmbd-0.dll", "mmbd.dll"]
+    # newest version first, then the unversioned fallback; MSYS2 builds have
+    # the "lib" prefix (libbluray-4.dll), MSVC-style builds do not (#207)
+    assert osplatform._names("bluray") == [
+        "libbluray-4.dll", "bluray-4.dll", "libbluray-2.dll", "bluray-2.dll",
+        "libbluray.dll", "bluray.dll"]
+    assert osplatform._names("mmbd") == ["libmmbd-0.dll", "mmbd-0.dll", "libmmbd.dll", "mmbd.dll"]
 
 
 def test_load_library_tries_windows_candidates_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -178,16 +181,20 @@ def test_load_library_tries_windows_candidates_in_order(monkeypatch: pytest.Monk
 
     def cdll(name: str) -> ctypes.CDLL:
         tried.append(name)
-        if name != "bluray-2.dll":
+        if name != "bluray-4.dll":
             raise OSError("not found")
         return LIB
 
     monkeypatch.setattr(osplatform, "MACOS", False)
     monkeypatch.setattr(osplatform, "WINDOWS", True)
+    def no_folder(name: str) -> None:
+        return None
+
+    monkeypatch.setattr(osplatform, "_prepare_library_dir", no_folder)
     monkeypatch.setattr(osplatform.ctypes.util, "find_library", nothing)
     monkeypatch.setattr(osplatform.ctypes, "CDLL", cdll)
     assert osplatform.load_library("bluray", "install libbluray") is LIB
-    assert tried == ["bluray-4.dll", "bluray-2.dll"]
+    assert tried == ["libbluray-4.dll", "bluray-4.dll"]
 
 
 def test_load_library_prefers_the_system_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,6 +225,99 @@ def test_load_library_raises_with_the_advice_when_nothing_works(
     monkeypatch.setattr(osplatform.ctypes, "CDLL", cdll)
     with pytest.raises(OSError, match=r"libbluray not found .*apt install libbluray2"):
         osplatform.load_library("bluray", "apt install libbluray2")
+
+
+def _windows_library_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                         files: list[str]) -> tuple[Path, list[str], list[str]]:
+    """A fake <Program Files>\\Spinema\\dll with these files; records what is
+    added to the DLL search path and what is loaded."""
+    dll = tmp_path / "Spinema" / "dll"
+    dll.mkdir(parents=True)
+    for f in files:
+        (dll / f).touch()
+    added: list[str] = []
+    loaded: list[str] = []
+
+    def add_dll_directory(path: str) -> object:
+        added.append(path)
+        return object()
+
+    def cdll(name: str) -> ctypes.CDLL:
+        loaded.append(name)
+        return LIB
+
+    monkeypatch.setattr(osplatform, "MACOS", False)
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setattr(osplatform, "_dll_directories", {})
+    monkeypatch.setenv("PROGRAMW6432", str(tmp_path))
+    monkeypatch.setattr(osplatform.os, "add_dll_directory", add_dll_directory, raising=False)
+    def nothing(name: str) -> str | None:
+        return None
+
+    monkeypatch.setattr(osplatform.ctypes.util, "find_library", nothing)
+    monkeypatch.setattr(osplatform.ctypes, "CDLL", cdll)
+    return dll, added, loaded
+
+
+def test_library_dir_on_windows_is_in_the_install_dir(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setenv("PROGRAMW6432", str(tmp_path))
+    assert osplatform.library_dir() == tmp_path / "Spinema" / "dll"
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
+    assert osplatform.library_dir() is None
+
+
+def test_load_library_on_windows_preloads_what_libbluray_loads_by_name(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Python ignores PATH for DLLs (only add_dll_directory), and libbluray loads
+    # libaacs/libbdplus/libmmbd64 itself only from python.exe's folder or System32:
+    # loaded first from our folder, libbluray gets them by module name (#207)
+    dll, added, loaded = _windows_library_dir(
+        monkeypatch, tmp_path, ["libaacs.dll", "libbdplus.dll", "libbluray-4.dll"])
+    assert osplatform.load_library("bluray", "install libbluray") is LIB
+    assert added == [str(dll)]
+    assert loaded == [str(dll / "libaacs.dll"), str(dll / "libbdplus.dll"), "libbluray-4.dll"]
+
+
+def test_load_library_on_windows_preloads_libdvdcss_for_libdvdread(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    dll, _, loaded = _windows_library_dir(
+        monkeypatch, tmp_path, ["libdvdcss-2.dll", "libdvdread-8.dll"])
+    osplatform.load_library("dvdread", "install libdvdread")
+    assert loaded == [str(dll / "libdvdcss-2.dll"), "libdvdread-8.dll"]
+
+
+def test_load_library_on_windows_adds_the_folder_once(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # bluray.py and dvd.py both load: one search-path entry, kept alive for the process
+    dll, added, _ = _windows_library_dir(monkeypatch, tmp_path, ["libbluray-4.dll"])
+    osplatform.load_library("bluray", "install libbluray")
+    osplatform.load_library("dvdread", "install libdvdread")
+    assert added == [str(dll)]
+
+
+def test_load_library_on_windows_without_the_folder_uses_the_system_lookup(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # a developer's own DLLs (e.g. next to python.exe) still work without an install
+    _, added, loaded = _windows_library_dir(monkeypatch, tmp_path, [])
+    monkeypatch.setenv("PROGRAMW6432", str(tmp_path / "elsewhere"))
+    osplatform.load_library("bluray", "install libbluray")
+    assert added == []
+    assert loaded == ["libbluray-4.dll"]
+
+
+def test_load_library_on_windows_a_broken_companion_says_which(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # libaacs present but its libgcrypt missing: say so, not "the disc is encrypted" later
+    _windows_library_dir(monkeypatch, tmp_path, ["libaacs.dll"])
+
+    def cdll(name: str) -> ctypes.CDLL:
+        raise OSError("[WinError 126] The specified module could not be found")
+
+    monkeypatch.setattr(osplatform.ctypes, "CDLL", cdll)
+    with pytest.raises(OSError, match=r"libaacs\.dll.*cannot be loaded.*WinError 126"):
+        osplatform.load_library("bluray", "install libbluray")
 
 
 def test_has_library_found_by_the_system_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -326,6 +426,7 @@ def test_default_mount_point_on_windows_is_below_the_shared_folder(
     # the installer shares <install dir>\share as "Spinema" and lets the user
     # write there: the mount folder goes below it, never shared itself (#102)
     monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.delenv("PROGRAMW6432", raising=False)
     monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
     assert osplatform.default_mount_point() == str(tmp_path / "Spinema" / "share" / "Disks")
 
@@ -333,9 +434,21 @@ def test_default_mount_point_on_windows_is_below_the_shared_folder(
 def test_default_mount_point_on_windows_without_programfiles(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.delenv("PROGRAMW6432", raising=False)
     monkeypatch.delenv("PROGRAMFILES", raising=False)
     assert osplatform.default_mount_point() == str(
         Path("C:\\Program Files") / "Spinema" / "share" / "Disks")
+
+
+def test_default_mount_point_on_windows_ignores_a_32_bit_python(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # a 32-bit Python on 64-bit Windows sees "Program Files (x86)" in PROGRAMFILES;
+    # PROGRAMW6432 is the 64-bit folder the installer shares, for every bitness (#209)
+    monkeypatch.setattr(osplatform, "WINDOWS", True)
+    monkeypatch.setenv("PROGRAMW6432", str(tmp_path / "Program Files"))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "Program Files (x86)"))
+    assert osplatform.default_mount_point() == str(
+        tmp_path / "Program Files" / "Spinema" / "share" / "Disks")
 
 
 def test_fuse_creates_the_mount_point_only_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:

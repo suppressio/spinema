@@ -145,19 +145,72 @@ _LIBRARY_VERSIONS: dict[str, tuple[int, ...]] = {
 }
 
 
+# The libraries these load by themselves, by module name: libbluray asks for
+# libaacs.dll, libbdplus.dll, libmmbd64.dll (dl_win32.c adds ".dll"), libdvdread
+# for libdvdcss-2.dll. libbluray looks only in python.exe's folder and System32,
+# so they are loaded first from our folder: Windows then hands back the module
+# already loaded with that name. Their own dependencies (libgcrypt...) are found
+# through add_dll_directory while we load them.
+_WINDOWS_COMPANIONS: dict[str, tuple[str, ...]] = {
+    "bluray": ("libaacs.dll", "libbdplus.dll", "libmmbd64.dll"),
+    "dvdread": ("libdvdcss-2.dll",),
+}
+
+# add_dll_directory's handles: the folder leaves the search path when one is
+# garbage-collected, so they are kept for the whole process
+_dll_directories: dict[str, object] = {}
+
+
 def _names(name: str) -> list[str]:
     """Candidate file names for a shared library on this OS, newest first."""
     versions = _LIBRARY_VERSIONS.get(name, ())
     if MACOS:
         return [f"lib{name}.{v}.dylib" for v in versions] + [f"lib{name}.dylib"]
     if WINDOWS:
-        return [f"{name}-{v}.dll" for v in versions] + [f"{name}.dll"]
+        # MSYS2 builds are libbluray-4.dll, MSVC-style ones bluray-4.dll
+        return [n for v in [*(f"-{v}" for v in versions), ""]
+                for n in (f"lib{name}{v}.dll", f"{name}{v}.dll")]
     return [f"lib{name}.so.{v}" for v in versions]
+
+
+def _windows_install_dir() -> Path:
+    """<Program Files>\\Spinema, the 64-bit folder whatever this Python's bitness:
+    a 32-bit Python sees "Program Files (x86)" in PROGRAMFILES (#209)."""
+    program_files = (os.environ.get("PROGRAMW6432") or os.environ.get("PROGRAMFILES")
+                     or "C:\\Program Files")
+    return Path(program_files) / "Spinema"
+
+
+def library_dir() -> Path | None:
+    """The folder the Windows installer puts the disc DLLs in; None elsewhere,
+    where the system's own lookup finds them."""
+    return _windows_install_dir() / "dll" if WINDOWS else None
+
+
+def _prepare_library_dir(name: str) -> None:
+    """Windows: put our DLL folder on the search path (Python ignores PATH for
+    DLLs since 3.8) and load the libraries `name` loads by itself."""
+    folder = library_dir()
+    if folder is None or not folder.is_dir():
+        return
+    if str(folder) not in _dll_directories:
+        _dll_directories[str(folder)] = os.add_dll_directory(str(folder))  # type: ignore[attr-defined,unused-ignore]
+    for companion in _WINDOWS_COMPANIONS.get(name, ()):
+        path = folder / companion
+        if not path.exists():
+            continue  # optional: no libbdplus, no MakeMKV
+        try:
+            ctypes.CDLL(str(path))
+        except OSError as e:
+            raise OSError(f"{path} cannot be loaded, a DLL it needs is missing: {e}") from e
 
 
 def load_library(name: str, advice: str) -> ctypes.CDLL:
     """Load a shared library by its common name ("bluray", "dvdread"): the
-    system's own lookup first, then the version suffixes Debian/Ubuntu ship."""
+    system's own lookup first, then the version suffixes Debian/Ubuntu ship.
+    On Windows our DLL folder is prepared first (_prepare_library_dir)."""
+    if WINDOWS:
+        _prepare_library_dir(name)
     for candidate in filter(None, [ctypes.util.find_library(name), *_names(name)]):
         try:
             return ctypes.CDLL(candidate)
@@ -201,8 +254,7 @@ def default_mount_point() -> str:
     inside the folder the installer shares, never the shared folder itself.
     On Windows a mount folder cannot be shared, its parent can (#102)."""
     if WINDOWS:
-        program_files = os.environ.get("PROGRAMFILES") or "C:\\Program Files"
-        return str(Path(program_files) / "Spinema" / "share" / "Disks")
+        return str(_windows_install_dir() / "share" / "Disks")
     return "/srv/spinema/Disks"
 
 
