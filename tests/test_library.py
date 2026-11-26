@@ -464,6 +464,18 @@ def test_loading_animation_at_the_first_open(tmp_path: Path) -> None:
     assert {tag for _, tag in packets(data, 0)} == {b"L"}
 
 
+def test_loading_animation_when_the_file_start_is_read_again(tmp_path: Path) -> None:
+    # a file opened again later, its pipeline stopped and its start not cached:
+    # the scan at the new open must not wait for the movie either
+    vf = vfile(tmp_path, loader="spinner.mp4")
+    vf.read(0, 4096)
+    vf.stop()
+    vf.head = None
+    vf.last_read = time.monotonic() - 600
+    vf.read(0, 4096)
+    assert vf.gens[0].loader is not None
+
+
 def test_no_animation_at_the_first_open_without_a_loader(tmp_path: Path) -> None:
     vf = vfile(tmp_path)
     vf.read(0, 4096)

@@ -17,6 +17,6 @@ Torna al [README](../README.it.md).
 - **Gli occhiali non vedono la cartella condivisa**: verifica che PC e occhiali siano sulla stessa rete, e controlla il firewall (porta 445/TCP). Da un altro PC Linux: `smbclient -N -L //<ip-del-pc>`.
 - **L'immagine va a scatti**: controlla prima il Wi-Fi (5 GHz, vicino al router). Poi il log delle pipeline (`/tmp/bd3d-pipeline.log`, oppure `docker compose logs`).
 - **Un file nuovo in `MOVIES_DIR` non compare**: le cartelle vengono lette all'avvio. Riavvia il programma o il container (i lettori invece sono controllati di continuo).
-- **Dopo un salto compare per qualche secondo un'animazione di caricamento, e il film riparte un po' dopo il punto scelto**: il lettore si sta spostando nel nuovo punto. [docs/OPTIONS.it.md](OPTIONS.it.md#animazione-di-caricamento-dopo-un-salto) spiega perché, e come spegnerla.
+- **Dopo un salto compare per qualche secondo un'animazione di caricamento, e il film riparte un po' dopo il punto scelto**: il lettore si sta spostando nel nuovo punto. [docs/OPTIONS.it.md](OPTIONS.it.md#animazione-di-caricamento-dopo-un-salto-o-allinizio) spiega perché, e come spegnerla.
 
 Per segnalare un problema: [apri una issue](https://github.com/suppressio/spinema/issues/new/choose) con il modulo **Something does not work**. Chiede la versione (`spinema --version`), il disco, il player e il log del programma intorno al problema (è salvato in `~/.local/state/spinema/spinema.log`); se riesci a farlo ripetere, avvia il programma con `--debug`. Non incollare mai chiavi.

@@ -17,6 +17,6 @@ Back to the [README](../README.md).
 - **The glasses do not see the share**: check that the PC and the glasses are on the same network, and the firewall (port 445/TCP). From another Linux PC: `smbclient -N -L //<pc-ip>`.
 - **The picture stutters**: check the Wi-Fi first (5 GHz, close to the router). Then the pipeline log (`/tmp/bd3d-pipeline.log`, or `docker compose logs`).
 - **A new file in `MOVIES_DIR` does not appear**: folders are scanned at startup. Restart the program / the container (drives are watched continuously).
-- **After a jump a loading animation plays for a few seconds, and the movie starts a little after the point you chose**: the drive is moving to the new point. [docs/OPTIONS.md](OPTIONS.md#loading-animation-after-a-jump) explains why, and how to turn it off.
+- **After a jump a loading animation plays for a few seconds, and the movie starts a little after the point you chose**: the drive is moving to the new point. [docs/OPTIONS.md](OPTIONS.md#loading-animation-after-a-jump-or-at-the-start) explains why, and how to turn it off.
 
 Reporting a problem: [open an issue](https://github.com/suppressio/spinema/issues/new/choose) with the **Something does not work** form. It asks for the version (`spinema --version`), the disc, the player and the program's log around the problem (it is saved in `~/.local/state/spinema/spinema.log`); if you can make it happen again, run the program with `--debug`. Never paste keys.
