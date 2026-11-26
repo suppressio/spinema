@@ -60,7 +60,7 @@ All the procedures described here are a balanced compromise between "manual" and
 #### Decryption: bring your own keys
 Commercial Blu-rays are encrypted (AACS, some also BD+). The project **does not provide or download any key**; it uses what you have, in this order:
 1. **libaacs + `KEYDB.cfg`**: fully open source. Put a key database in `~/.config/aacs/KEYDB.cfg` (for Docker: the folder you set as `AACS_DIR`).
-2. **MakeMKV**, if installed and registered: its `libmmbd` library decrypts AACS in place of libaacs.
+2. **MakeMKV**, if installed and active: its `libmmbd` library decrypts AACS in place of libaacs. After installing it, open MakeMKV once and either start its 30-day evaluation or enter a registration key (*Help → Register*; the free beta key is on the [MakeMKV forum](https://forum.makemkv.com/forum/viewtopic.php?t=1053)): until then `libmmbd` decrypts nothing, even though MakeMKV is installed.
 3. Unencrypted **ISO / BDMV folders** need no keys.
 
 **BD+ discs** (a minority, released up to about 2017) are decrypted by **libaacs + libbdplus**, open source. libbdplus needs two things you provide, in `~/.config/bdplus/` (for Docker: the folder you set as `BDPLUS_DIR`): `vm0/`, its configuration, and `convtab/`, the precomputed conversion tables of the discs (a community archive covers practically every BD+ disc). Where to find them: the [ArchWiki Blu-ray page](https://wiki.archlinux.org/title/Blu-ray) and the thread it links ([archived copy](https://web.archive.org/web/20260910011411/https://forum.doom9.org/showthread.php?t=176924)). A BD+ disc without its table is skipped, and the log says so. MakeMKV is not used for BD+: it opens these discs, but after every jump in the movie the picture breaks up.
