@@ -1075,6 +1075,8 @@ def test_decrypt_backends(monkeypatch: pytest.MonkeyPatch) -> None:
     def missing(self: Path) -> bool:
         return False
 
+    # Linux's lookup, tested wherever this runs (Windows looks in MakeMKV's folder)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     monkeypatch.setattr(osplatform.ctypes.util, "find_library", nothing)
     monkeypatch.setattr(osplatform.Path, "exists", missing)
     assert sources._decrypt_backends() == [{}]

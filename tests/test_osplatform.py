@@ -410,6 +410,8 @@ def test_has_library_found_by_the_system_lookup(monkeypatch: pytest.MonkeyPatch)
     def found(name: str) -> str | None:
         return "libmmbd.so.0"
 
+    # Linux's lookup, tested wherever this runs (Windows looks in MakeMKV's folder)
+    monkeypatch.setattr(osplatform, "WINDOWS", False)
     monkeypatch.setattr(osplatform.ctypes.util, "find_library", found)
     assert osplatform.has_library("mmbd") is True
 
