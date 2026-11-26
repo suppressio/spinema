@@ -421,13 +421,16 @@ def test_loading_animation_after_a_jump(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(library, "AHEAD_MAX", 8 * 1024 * 1024)
     source = FakeSource(str(tmp_path / "disc"))
     vf = vfile(tmp_path, source, loader="spinner.mp4")
-    vf.read(0, 4096)                                     # first open: no animation
-    assert vf.gens[0].loader is None
+    ready_path = tmp_path / "movie_ready"
+    source.ready_path = str(ready_path)
+    vf.read(0, 4096)                                     # first open: the animation
+    assert vf.gens[0].loader is not None
+    ready_path.touch()
+    vf.read(4096, 4096)                                  # the player reads on: no pause
     # the movie's pipeline for the jump below waits for this file instead of a real
     # decoder's start-up time: the test controls exactly when it is "ready", not the
     # wall clock
-    ready_path = tmp_path / "movie_ready"
-    source.ready_path = str(ready_path)
+    ready_path.unlink()
     offset = 200 * BPS
     chunk = 32768
     ready_after = int(1.5 * BPS) // chunk + 1             # over 1.5s of animation first
@@ -450,6 +453,21 @@ def test_loading_animation_after_a_jump(tmp_path: Path, monkeypatch: pytest.Monk
     assert seen[switch][0] % KEYFRAME_EVERY == 0
     assert seen[switch][0] > 200 * PPS + PPS
     assert vf.gens[0].loader is None                     # the animation is stopped
+
+
+def test_loading_animation_at_the_first_open(tmp_path: Path) -> None:
+    # Windows' virus scan reads the file start while a client opens the file
+    # (#213): the animation answers it at once instead of the movie's start-up
+    vf = vfile(tmp_path, loader="spinner.mp4")
+    data = vf.read(0, 4096)
+    assert vf.gens[0].loader is not None
+    assert {tag for _, tag in packets(data, 0)} == {b"L"}
+
+
+def test_no_animation_at_the_first_open_without_a_loader(tmp_path: Path) -> None:
+    vf = vfile(tmp_path)
+    vf.read(0, 4096)
+    assert vf.gens[0].loader is None
 
 
 def test_no_animation_when_paused(tmp_path: Path) -> None:

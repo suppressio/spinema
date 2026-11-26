@@ -2,7 +2,7 @@
 
 # Research: Blu-ray playlists, title selection, FUSE adapter, Windows port
 
-> Research notes, collected on 2026-10-10 and 2026-10-13 while building title selection for multi-episode Blu-rays. Facts on the Blu-ray playlist format and on how other tools pick titles, each with its source; the format itself is not public, so these come from reverse-engineered documentation, source code and forums. The *Summary* is the short version, the sections after it hold the full findings. Code that relies on a finding cites this file (e.g. `src/sources.py`, Q4). The last two sections are separate topics with their own sources: *FUSE adapter*, measured on 2026-11-03, and *Windows port*, collected on 2026-11-20/21.
+> Research notes, collected on 2026-10-10 and 2026-10-13 while building title selection for multi-episode Blu-rays. Facts on the Blu-ray playlist format and on how other tools pick titles, each with its source; the format itself is not public, so these come from reverse-engineered documentation, source code and forums. The *Summary* is the short version, the sections after it hold the full findings. Code that relies on a finding cites this file (e.g. `src/sources.py`, Q4). The last two sections are separate topics with their own sources: *FUSE adapter*, measured on 2026-11-03, and *Windows port*, collected on 2026-11-20/21, with the virus scan at open added on 2026-11-26.
 
 ## Summary
 
@@ -685,6 +685,7 @@ Windows serves the virtual files the Linux way, with WinFsp in place of libfuse3
   - One stream: rejected, because edge264 reads Annex B only.
   - Loopback TCP: chosen. ffmpeg reads `tcp://127.0.0.1:<port>?listen=1&listen_timeout=<ms>` ([tcp.c](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/tcp.c); option names from the source, not yet run with ffmpeg), and `disc_reader` connects with the standard `socket` module.
 - **Firewall.** A process listening on `127.0.0.1` gets no Windows Firewall prompt. The control, the same process on `0.0.0.0`, gets the prompt at once. Checked with `python.exe`; ffmpeg is expected to behave the same (inferred). The DLNA server listens on the LAN, so it will get the prompt: the installer adds the rule. Cancelling the prompt silently creates a **Block** rule (seen in the check).
+- **The virus scan reads the file when it is opened.** Microsoft Defender scans every open of a file on the WinFsp volume (`RealTimeScan`, reason `OnOpen`, process `System (4)`), also over SMB, and the client's open waits for the scan. The scan reads the file start, then its end. Checked on the VM ([#212](https://github.com/suppressio/spinema/issues/212)) with `New-MpPerformanceRecording` and `Get-MpPerformanceReport`, while `smbclient` only opened a file: the scan took 3.9 s, as long as the open. The result is not cached, every open is scanned again; once the file start is in Spinema's cache the scan takes a few ms. So the first open waits for the movie at 0:00:00: on a machine slower than real time `smbclient` gave up after 20 s ([#208](https://github.com/suppressio/spinema/issues/208)). Under SMB the scan and the player both read as `System (4)`, so Spinema cannot tell them apart: the loading animation now answers the first read of every file. A Defender exclusion would fix Defender only, and needs an admin. Samba on Linux has no on-access scan in front of it (inferred).
 
 ### Gaps
 
@@ -702,3 +703,4 @@ Windows serves the virtual files the Linux way, with WinFsp in place of libfuse3
 - [WinFsp: tutorial](https://github.com/winfsp/winfsp/blob/master/doc/WinFsp-Tutorial.asciidoc) (mount point: drive or directory)
 - [FFmpeg: libavformat/file.c](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/file.c) (`pipe:`, `fd:`, `handle:`)
 - [FFmpeg: libavformat/tcp.c](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/tcp.c) (`listen`, `listen_timeout`)
+- [Microsoft: New-MpPerformanceRecording](https://learn.microsoft.com/powershell/module/defenderperformance/new-mpperformancerecording) (Defender's scans: what, why, which process)
